@@ -10,6 +10,7 @@ import { redact, terminate } from './runtime';
 import { validateRules, validateResponseContracts, assertSourceEvidence, responseUnresolved } from './rules';
 import { validateDependencyDraft } from './dependencies';
 import { cliEnvironment } from './cli-environment';
+import { dependencyService } from '../shared/mock-routing';
 const exec=promisify(execFile);
 
 export async function detectAgents():Promise<AgentInfo[]>{
@@ -58,7 +59,7 @@ function acceptGeneration(task:Task,result:{summary?:unknown;dependencies?:unkno
     const assumptions=noteList(row.assumptions,'假设'),modelUnresolved=noteList(row.unresolved,'未解析结构');
     if(claimsExecuted([row.basis,...assumptions,...evidence.map(e=>e.reason)].join('\n')))throw new Error(dep.name+' 的说明声称已经运行或验证业务行为');
     let discovered:string[]=[];try{discovered=responseUnresolved(body,dep.responseType,index,row.status);}catch(e){throw new Error(`${dep.name} 响应不符合 ${dep.responseType||'DTO'}：${(e as Error).message}`);}
-    return{id:randomUUID(),dependencyId:dep.id,name:dep.name,scenario:generation.scope.scenarioName,method:dep.method,path:dep.path,status:row.status,headers:{'Content-Type':'application/json'},body,delay:0,enabled:true,query:{},requestHeaders:{},basis:row.basis.trim().replace(/[。\s]*$/,'')+'。静态阅读源码得出，未经运行或调用验证。',version:1,evidence,assumptions,unresolved:[...new Set([...modelUnresolved,...discovered])].filter(Boolean).slice(0,20)};
+    return{id:randomUUID(),dependencyId:dep.id,name:dep.name,scenario:generation.scope.scenarioName,method:dep.method,path:dep.path,service:dependencyService(dep),status:row.status,headers:{'Content-Type':'application/json'},body,delay:0,enabled:true,query:{},requestHeaders:{},basis:row.basis.trim().replace(/[。\s]*$/,'')+'。静态阅读源码得出，未经运行或调用验证。',version:1,evidence,assumptions,unresolved:[...new Set([...modelUnresolved,...discovered])].filter(Boolean).slice(0,20)};
   });
   validateRules(proposals);validateResponseContracts(proposals,generation.workflow.dependencies,index);
   task.summary=redact(result.summary.trim()+(result.summary.includes('未经运行')?'':'。静态阅读源码得出，未经运行或调用验证。'));task.proposal=proposals;
@@ -178,7 +179,7 @@ evidence 的 file 必须是 project 下真实 Java 相对路径，line 必须是
             const existing=ws.rules.find(x=>x.dependencyId===dep.id&&x.enabled);
             return{...(existing||{id:randomUUID(),dependencyId:dep.id,name:dep.name,scenario:'AI candidate',method:dep.method,path:dep.path,headers:{'Content-Type':'application/json'},delay:0,enabled:true,query:{},requestHeaders:{},version:1}),status:rule.status,body:JSON.parse(rule.body),basis:'AI 候选，业务契约未验证；需人工审核后应用'};
           });
-          validateRules(proposals);task.proposal=proposals;task.status='completed';
+          task.proposal=validateRules(proposals,wf?.dependencies);task.status='completed';
           }
         }catch(e){task.status='failed';task.error=redact((e as Error).message);}
       }

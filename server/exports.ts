@@ -1,10 +1,11 @@
 import { STATUS_CODES } from 'node:http';
-import type { MockRule } from '../shared/types';
+import type { Dependency } from '../shared/types';
 import { mapping, validateRules } from './rules';
+import { mockRequestPath } from '../shared/mock-routing';
 
-export function exportMocks(input:unknown,format:unknown,name='Mockingbird',port=9090,includeDisabled=false){
+export function exportMocks(input:unknown,format:unknown,name='Mockingbird',port=9090,includeDisabled=false,dependencies?:Dependency[]){
   if(format!=='wiremock'&&format!=='postman')throw new Error('请选择 WireMock 或 Postman Collection');
-  const rules=validateRules(input).filter(r=>includeDisabled||r.enabled);
+  const rules=validateRules(input,dependencies).filter(r=>includeDisabled||r.enabled);
   if(!rules.length)throw new Error('没有可导出的规则');
   if(format==='wiremock'&&includeDisabled){
     // WireMock has no enabled flag: validate the selected scenarios together.
@@ -15,8 +16,9 @@ export function exportMocks(input:unknown,format:unknown,name='Mockingbird',port
     info:{name:name+' Mocks',schema:'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',description:'Mockingbird 导出的请求和响应 Examples。路径变量示例值可修改。Postman Mock Server 需另行创建并配置匹配；规则延迟不自动生效。'},
     variable:[{key:'baseUrl',value:`http://127.0.0.1:${port}`,type:'string'}],
     item:rules.map(rule=>{
-      const variables=[...new Set([...rule.path.matchAll(/\{([^}]+)\}/g)].map(m=>m[1]))];
-      const requestPath=rule.path.replace(/\{([^}]+)\}/g,':$1');
+      const actualPath=mockRequestPath(rule);
+      const variables=[...new Set([...actualPath.matchAll(/\{([^}]+)\}/g)].map(m=>m[1]))];
+      const requestPath=actualPath.replace(/\{([^}]+)\}/g,':$1');
       const query=Object.entries(rule.query).map(([key,value])=>({key,value}));
       const headers=Object.entries(rule.requestHeaders).map(([key,value])=>({key,value}));
       if(rule.requestBody!==undefined&&!headers.some(h=>h.key.toLowerCase()==='content-type'))headers.push({key:'Content-Type',value:'application/json'});

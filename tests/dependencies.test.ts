@@ -6,6 +6,7 @@ import os from 'node:os';
 import { Workbench } from '../server/workbench';
 import { paymentDependencies } from './fixtures';
 import type { DependencyDraft, Task } from '../shared/types';
+import { dependencyService } from '../shared/mock-routing';
 
 async function setup(){
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-discovery-')),project=path.join(temp,'project');
@@ -108,7 +109,7 @@ else{assert.equal(value('--model'),prompt.includes('custom-test')?'grok-4.1-cust
 `,{mode:0o755});
     bench.agents=[{id:'grok',installed:true,path:executable}];
     const wait=async(task:Task)=>{for(let i=0;i<150&&task.status==='running';i++)await new Promise(r=>setTimeout(r,20));assert.notEqual(task.status,'running');};
-    const task=await bench.chat('grok','生成 Mock');await wait(task);assert.equal(task.status,'completed',task.error);assert.equal(task.proposal?.length,1);assert.equal(bench.workspace.rules.length,0);
+    const task=await bench.chat('grok','生成 Mock');await wait(task);assert.equal(task.status,'completed',task.error);assert.equal(task.proposal?.length,1);assert.equal(bench.workspace.rules.length,0);assert.deepEqual(task.proposal?.[0].service,dependencyService(dep));
     await bench.approveTask(task.id);assert.equal(bench.workspace.rules.length,1);
     const custom=await bench.chat('grok','custom-test','grok-4.1-custom');await wait(custom);assert.equal(custom.status,'completed',custom.error);
     const failed=await bench.chat('grok','error-test');await wait(failed);assert.equal(failed.status,'failed');assert.match(failed.error!,/test failure/);

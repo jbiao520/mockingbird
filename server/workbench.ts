@@ -14,9 +14,10 @@ import { generateRules, validateRules, validateResponseContracts, assertSourceEv
 import type { GenerationLaunch } from './agents';
 import { routePreview, writeRoutes, ProjectLauncher } from './routes';
 import { compute } from './analysis';
+import { generateRequestTemplate, validateEntryRequest } from './request-shape';
 import { confirmDependency, pruneWorkflow } from './dependencies';
 const exec=promisify(execFile);
-function dependencyFingerprint(wf:Workflow,ids:string[]){return ids.map(id=>{const dep=wf.dependencies.find(item=>item.id===id);return dep?`${dep.id}\t${dep.method}\t${dep.path}\t${dep.responseType||''}\t${dep.status}`:`missing:${id}`;}).join('\n');}
+function dependencyFingerprint(wf:Workflow,ids:string[]){return ids.map(id=>{const dep=wf.dependencies.find(item=>item.id===id);return dep?`${dep.id}\t${dep.method}\t${dep.path}\t${dep.responseType||''}\t${dep.status}\t${dep.configKey||''}\t${dep.originalBase||''}`:`missing:${id}`;}).join('\n');}
 export interface Options { root:string; dataDir:string; runtimeDir?:string; samplePath?:string; desktop?:boolean; chooseDirectory?:()=>Promise<string|null>;saveExport?:(artifact:{filename:string;content:string})=>Promise<string|null> }
 export class Workbench extends EventEmitter{
   workspace:Workspace=emptyWorkspace();index?:Index;
@@ -90,7 +91,11 @@ export class Workbench extends EventEmitter{
     const dep=confirmDependency(input,index,wf,task?'ai':existing?.evidence.kind==='ai'?'ai':'manual',existing);
     if(existing&&ws.rules.some(r=>r.dependencyId===existing.id)&&(existing.method!==dep.method||existing.path!==dep.path))throw new Error('请先删除此依赖的 Mock 规则，再修改请求方法或路径');
     wf.dependencies=existing?wf.dependencies.map(d=>d.id===dep.id?dep:d):[...wf.dependencies,dep];
-    pruneWorkflow(wf);await saveWorkspace(ws);this.workspace=ws;
+    pruneWorkflow(wf);ws.rules=validateRules(ws.rules,ws.workflows.flatMap(w=>w.dependencies));
+    const rulesChanged=JSON.stringify(ws.rules)!==JSON.stringify(this.workspace.rules);
+    if(rulesChanged)await this.runtime.publish(ws.rules);
+    try{await saveWorkspace(ws);}catch(e){if(rulesChanged)await this.runtime.publish(this.workspace.rules);throw e;}
+    this.workspace=ws;
     if(task)task.acceptedDependencies=[...(task.acceptedDependencies||[]),candidateIndex!];
     this.changed();return dep;
   }
@@ -155,16 +160,14 @@ export class Workbench extends EventEmitter{
     return{rules:task.proposal};
   }
   async setRules(input:unknown){
-    const rules=validateRules(input);const dependencies=this.workspace.workflows.flatMap(w=>w.dependencies);
+    const dependencies=this.workspace.workflows.flatMap(w=>w.dependencies),rules=validateRules(input,dependencies);
     for(const task of this.agentManager.tasks)if(task.proposal?.length&&!task.approved&&task.revision&&task.proposal.some(proposal=>rules.some(rule=>rule.id===proposal.id)))this.assertTaskFresh(task);
     for(const rule of rules){if(!dependencies.some(d=>d.id===rule.dependencyId))throw new Error(`规则 ${rule.name} 对应的依赖已不存在，请重新生成`);if(rule.evidence?.length)assertSourceEvidence(rule.evidence,this.requireIndex());}
     validateResponseContracts(rules,dependencies,this.requireIndex());
     const previous=this.workspace.rules;
     const next=rules.map(r=>{const before=previous.find(p=>p.id===r.id);return{...r,version:before&&JSON.stringify({...before,version:0})!==JSON.stringify({...r,version:0})?before.version+1:before?.version||1};});
     await this.runtime.publish(next);
-    const changed=JSON.stringify(previous)!==JSON.stringify(next);
-    const before={id:randomUUID(),name:'ChangeSet · before mock update',createdAt:new Date().toISOString(),revision:this.requireIndex().project.revision,workflowId:this.workspace.activeWorkflowId,rules:structuredClone(previous),routes:Object.fromEntries(dependencies.map(d=>[d.id,d.route])),port:this.runtime.state.port};
-    const ws={...this.workspace,rules:next,snapshots:changed?[before,...this.workspace.snapshots].slice(0,50):this.workspace.snapshots};
+    const ws={...this.workspace,rules:next};
     try{await saveWorkspace(ws);}catch(e){await this.runtime.publish(previous);throw e;}
     this.workspace=ws;
     for(const task of this.agentManager.tasks)if(task.proposal?.length&&task.proposal.every(r=>next.some(n=>n.id===r.id)))task.approved=true;
@@ -187,23 +190,7 @@ export class Workbench extends EventEmitter{
     try{await saveWorkspace(ws);}catch(e){await atomicWrite(path.join(this.requireIndex().project.path,'.mockingbird/routes.properties'),original);throw e;}
     this.workspace=ws;if(this.launcher.child)this.launcher.state.stale=true;this.changed();return preview;
   }
-  async snapshot(name:string){
-    const wf=this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId);
-    const snapshot={id:randomUUID(),name:name.trim()||'Environment snapshot',createdAt:new Date().toISOString(),revision:this.requireIndex().project.revision,workflowId:wf?.id,rules:structuredClone(this.workspace.rules),routes:Object.fromEntries(this.workspace.workflows.flatMap(w=>w.dependencies).map(d=>[d.id,d.route])),port:this.runtime.state.port};
-    const ws={...this.workspace,snapshots:[snapshot,...this.workspace.snapshots].slice(0,50)};await saveWorkspace(ws);this.workspace=ws;this.changed();return snapshot;
-  }
-  async restore(id:string){
-    const snapshot=this.workspace.snapshots.find(s=>s.id===id);if(!snapshot)throw new Error('Snapshot 不存在');
-    if(this.runtime.child&&snapshot.port!==this.runtime.state.port)throw new Error('Snapshot 端口与运行服务不同，请先停止 Mock Server 后恢复');
-    const ws=structuredClone(this.workspace);ws.rules=validateRules(snapshot.rules);
-    const known=new Set(ws.workflows.flatMap(w=>w.dependencies).map(d=>d.id));if(snapshot.rules.some(r=>!known.has(r.dependencyId)))throw new Error('Snapshot 对应旧的 Flow，请恢复原源码并重新导入后再试');
-    for(const dep of ws.workflows.flatMap(w=>w.dependencies))dep.route=snapshot.routes[dep.id]||'real';
-    const prev=(await routePreview(this.workspace,this.runtime.state.port)).config;
-    await this.runtime.publish(ws.rules);
-    try{await writeRoutes(ws,snapshot.port);await saveWorkspace(ws);}catch(e){await this.runtime.publish(this.workspace.rules);await atomicWrite(path.join(this.requireIndex().project.path,'.mockingbird/routes.properties'),prev);throw e;}
-    this.workspace=ws;this.runtime.state.port=snapshot.port;if(this.launcher.child)this.launcher.state.stale=true;
-    this.addMessage('assistant',`已恢复快照「${snapshot.name}」的 Mock 与路由配置。运行中的 Java 项目需要重启以载入恢复后的路由。`);await saveWorkspace(ws);this.changed();
-  }
+
   async chat(agent:string,prompt:string,model?:string,workflowId?:string){
     if(!prompt.trim()||prompt.length>10000)throw new Error('请输入 1–10,000 字符的请求');this.requireFreshIndex();
     if(workflowId)await this.selectWorkflow(workflowId);
@@ -237,14 +224,17 @@ export class Workbench extends EventEmitter{
     }else{const replace=new Set(task.proposal.map(r=>r.id)),deps=new Set(task.proposal.map(r=>r.dependencyId));await this.setRules([...this.workspace.rules.filter(r=>!replace.has(r.id)&&!deps.has(r.dependencyId)),...task.proposal]);}
     task.approved=true;this.changed();
   }
-  async testRequest(input:{target:'mock'|'project';method:string;path:string;body?:unknown;headers?:Record<string,string>}){
-    const data=z.object({target:z.enum(['mock','project']),method:z.enum(['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']),path:z.string().startsWith('/').max(2000),body:z.json().optional(),headers:z.record(z.string(),z.string()).optional()}).parse(input);
+  requestTemplate(entryId:string){return generateRequestTemplate(this.requireFreshIndex(),entryId);}
+  async testRequest(input:{target:'mock'|'project';method:string;path:string;body?:unknown;headers?:Record<string,string>;entryId?:string;revision?:string}){
+    const data=z.object({target:z.enum(['mock','project']),method:z.enum(['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']),path:z.string().startsWith('/').max(2000),body:z.json().optional(),headers:z.record(z.string(),z.string()).optional(),entryId:z.string().optional(),revision:z.string().optional()}).parse(input);
     if(data.path.startsWith('//')||data.path.startsWith('/__admin')||data.path.includes('://'))throw new Error('请求路径非法');
+    let warnings:string[]=[];
+    if(data.target==='project'&&data.entryId){const index=this.requireFreshIndex();if(data.revision!==index.project.revision)throw new Error('请求样例已过期，请重新点击“验证入口 API”');warnings=validateEntryRequest(index,data.entryId,data).warnings;}
     const runtime=data.target==='mock'?this.runtime.state:this.launcher.state;if(runtime.status!=='running')throw new Error('目标服务尚未运行');
     const url=`http://127.0.0.1:${runtime.port}${data.path}`;const started=Date.now();
-    const response=await fetch(url,{method:data.method,headers:{'Content-Type':'application/json',...data.headers},body:['GET','HEAD'].includes(data.method)?undefined:JSON.stringify(data.body??{}),redirect:'error',signal:AbortSignal.timeout(35000)});
+    const response=await fetch(url,{method:data.method,headers:{'Content-Type':'application/json',...data.headers},body:['GET','HEAD'].includes(data.method)||data.body===undefined?undefined:JSON.stringify(data.body),redirect:'error',signal:AbortSignal.timeout(35000)});
     const body=redact((await response.text()).slice(0,1024*1024));
-    return{status:response.status,headers:Object.fromEntries(response.headers),body,duration:Date.now()-started,url};
+    return{status:response.status,headers:Object.fromEntries(response.headers),body,duration:Date.now()-started,url,warnings};
   }
   async terminalCommand(command:string){
     const choices:Record<string,[string,string[]]>={'java --version':['java',['--version']],'mvn --version':['mvn',['--version']],'git status --short':['git',['status','--short']],'git rev-parse HEAD':['git',['rev-parse','HEAD']]};

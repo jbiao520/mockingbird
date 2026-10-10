@@ -10,6 +10,7 @@ import { indexProject } from '../server/analyzer';
 import type { Index } from '../server/analyzer';
 import type { Dependency, MockRule, Task } from '../shared/types';
 import { paymentDependencies } from './fixtures';
+import { dependencyService } from '../shared/mock-routing';
 
 const bundleSource=`package dev.mockingbird.payment;
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -175,6 +176,24 @@ test('Branch prompts differ and invalid shapes, evidence, CLI failures or stale 
     assert.throws(()=>ctx.bench.reviewTask(current.id),/过期/);
     await assert.rejects(()=>ctx.bench.approveTask(current.id),/过期/);
     await assert.rejects(()=>ctx.bench.setRules(current.proposal),/过期/);
+    assert.equal(ctx.bench.workspace.rules.length,0);
+  }finally{await ctx.close();}
+});
+
+test('Source generation scopes identical endpoints by service and rejects candidates after routing changes',async()=>{
+  const ctx=await setup();
+  try{
+    const user=ctx.deps[0],draft=paymentDependencies(ctx.bench.index!)[0];
+    const other=await ctx.bench.saveDependency(ctx.wf.id,{...draft,name:'Other User',configKey:'services.inventory.url'},ctx.deps[1].id);
+    await ctx.writeResult(generated([user,other],[{id:'one',name:'First',active:true},{id:'two',name:'Second',active:false}]));
+    const task=await ctx.bench.generateWithAgent({workflowId:ctx.wf.id,dependencyIds:[user.id,other.id],scenario:'success',agent:'grok'});
+    await ctx.wait(task);assert.equal(task.status,'completed',task.error);
+    assert.deepEqual(task.proposal?.map(rule=>rule.service),[dependencyService(user),dependencyService(other)]);
+    assert.equal(ctx.bench.reviewTask(task.id).rules.length,2);
+    await ctx.bench.saveDependency(ctx.wf.id,{...draft,configKey:'services.bank.url'},user.id);
+    assert.throws(()=>ctx.bench.reviewTask(task.id),/依赖已变化/);
+    await assert.rejects(()=>ctx.bench.approveTask(task.id),/依赖已变化/);
+    await assert.rejects(()=>ctx.bench.setRules(task.proposal),/依赖已变化/);
     assert.equal(ctx.bench.workspace.rules.length,0);
   }finally{await ctx.close();}
 });

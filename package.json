@@ -10,6 +10,7 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
     "desktop": "npm run build && electron .",
+    "icons": "electron scripts/generate-icons.mjs",
     "build": "tsc --noEmit && vite build && node scripts/build.mjs",
     "start": "node dist/server.mjs",
     "test": "tsx --test tests/*.test.ts",
@@ -54,6 +55,7 @@
   "build": {
     "appId": "dev.mockingbird.desktop",
     "productName": "Mockingbird",
+    "icon": "public/icon.png",
     "files": [
       "dist/**/*",
       "package.json"

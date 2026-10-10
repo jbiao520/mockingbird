@@ -43,17 +43,16 @@ export async function createServer(options:Options,port=4317){
   app.post('/api/rules/generate/ai',handle(req=>workbench.generateWithAgent(req.body),true));
   app.put('/api/rules',handle(req=>workbench.setRules(req.body.rules),true));
   app.post('/api/rules/export',handle(async req=>{
-    const artifact=exportMocks(req.body.rules??workbench.workspace.rules,req.body.format,workbench.workspace.project?.name,workbench.runtime.state.port,req.body.includeDisabled===true);
+    const artifact=exportMocks(req.body.rules??workbench.workspace.rules,req.body.format,workbench.workspace.project?.name,workbench.runtime.state.port,req.body.includeDisabled===true,workbench.workspace.workflows.flatMap(w=>w.dependencies));
     if(options.saveExport){const savedPath=await options.saveExport(artifact);return{savedPath,cancelled:!savedPath};}
     return artifact;
   }));
   app.post('/api/routes/preview',handle(req=>workbench.setRoutes(req.body.routes||{},Number(req.body.launchPort||18080))));
   app.post('/api/routes/apply',handle(req=>workbench.applyRoutes(req.body.routes||{}),true));
-  app.post('/api/snapshots',handle(req=>workbench.snapshot(String(req.body.name||'')),true));
-  app.post('/api/snapshots/restore',handle(req=>workbench.restore(req.body.id),true));
   app.post('/api/runtime/start',handle(async req=>{const desired=Number(req.body.port||9090);if(workbench.workspace.workflows.some(w=>w.dependencies.some(d=>d.route==='mock'))&&desired!==workbench.runtime.state.port)throw new Error('Mock 路由已应用，请先恢复 Real 路由再更改服务端口');await workbench.runtime.start(desired,workbench.workspace.rules);},true));
   app.post('/api/runtime/stop',handle(()=>workbench.runtime.stop(),true));
   app.get('/api/requests',handle(async()=>({requests:await workbench.runtime.requests()})));
+  app.post('/api/requests/template',handle(req=>workbench.requestTemplate(String(req.body.entryId||''))));
   app.post('/api/requests/test',handle(req=>workbench.testRequest(req.body)));
   app.post('/api/launch/start',handle(req=>workbench.launcher.start(workbench.workspace,Number(req.body.port||18080)),true));
   app.post('/api/launch/stop',handle(()=>workbench.launcher.stop(),true));

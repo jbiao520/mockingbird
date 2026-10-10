@@ -1,4 +1,5 @@
 import type { MockRule } from './types';
+import { mockRequestPath } from './mock-routing';
 
 function canonical(value:unknown):string{
   if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
@@ -7,7 +8,7 @@ function canonical(value:unknown):string{
 }
 export function overlaps(a:MockRule,b:MockRule){
   if(a.method!==b.method)return false;
-  const left=a.path.split('/'),right=b.path.split('/');if(left.length!==right.length)return false;
+  const left=mockRequestPath(a).split('/'),right=mockRequestPath(b).split('/');if(left.length!==right.length)return false;
   if(!left.every((segment,i)=>segment===right[i]||/\{[^}]+\}/.test(segment)||/\{[^}]+\}/.test(right[i])))return false;
   const disjoint=(x:Record<string,string>,y:Record<string,string>)=>Object.keys(x).some(key=>key in y&&x[key]!==y[key]);
   const headers=(input:Record<string,string>)=>Object.fromEntries(Object.entries(input).map(([key,value])=>[key.toLowerCase(),value]));

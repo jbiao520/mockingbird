@@ -9,6 +9,8 @@ async function boot(){
 app.setName('Mockingbird');
 await app.whenReady();
 const root=app.getAppPath(),dataDir=app.getPath('userData');
+const icon=path.join(root,'dist/renderer/icon.png');
+if(process.platform==='darwin')app.dock?.setIcon(icon);
 const sampleSource=app.isPackaged?path.join(process.resourcesPath,'examples/payment-service'):path.join(root,'examples/payment-service');
 const samplePath=path.join(dataDir,'examples/payment-service');
 try{await fs.access(samplePath);}catch{await fs.mkdir(path.dirname(samplePath),{recursive:true});await fs.cp(sampleSource,samplePath,{recursive:true,filter:s=>!s.includes('/target')&&!s.includes('/.mockingbird')});}
@@ -21,7 +23,7 @@ service=await createServer({root,dataDir,samplePath,desktop:true,runtimeDir:app.
 }},0);
 const url=`http://127.0.0.1:${service.port}`;
 function openWindow(){
-  mainWindow=new BrowserWindow({width:1500,height:980,minWidth:1060,minHeight:720,title:'Mockingbird',backgroundColor:'#f7f9fc',webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true}});
+  mainWindow=new BrowserWindow({width:1500,height:980,minWidth:1060,minHeight:720,title:'Mockingbird',icon,backgroundColor:'#f7f9fc',webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true}});
   mainWindow.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   mainWindow.webContents.on('will-navigate',(event,destination)=>{if(!destination.startsWith(url+'/'))event.preventDefault();});
   void mainWindow.loadURL(url);

@@ -7,4 +7,4 @@ Open this directory in Mockingbird, analyze the payment API, generate and apply 
 The original downstream addresses are loopback ports 19001–19004, which intentionally have no real service. Explicit samples are in `src/main/resources/mockingbird-contracts.json`.
 
 Request: `{"userId":"u_001","sku":"sku_001","quantity":1,"amount":128}`.
-Set Bank mock `approved` to false to observe `DECLINED`, then restore a snapshot and verify `COMPLETED`.
+Set Bank mock `approved` to false to observe `DECLINED`, then edit it back to true, save the rule and verify `COMPLETED`.

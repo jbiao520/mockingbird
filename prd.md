@@ -38,7 +38,7 @@ Mockingbird 是一款 AI 原生的 Java 开发与 Mock 管理 IDE。
 2. 降低 Mock 编写与维护成本。
 3. 降低对外部开发测试环境的依赖。
 4. 让业务 Flow 和 Mock 关系可视化。
-5. 让 Mock 配置和运行环境可恢复、可回滚。
+5. 让 Mock 配置和路由可保存，由用户自行管理。
 
 ### 1.4 MVP 成功标准
 
@@ -52,7 +52,7 @@ Mockingbird 是一款 AI 原生的 Java 开发与 Mock 管理 IDE。
 6. 启动 Mockingbird 内置 HTTP Mock Server。
 7. 将目标 Java 项目的指定下游请求路由至本地 Mock。
 8. 执行调用验证。
-9. 保存 Mock 配置并支持回滚。
+9. 保存 Mock 配置并支持用户管理。
 
 完成以上流程不应要求用户手工编写大量 Mock JSON 或逐一修改 URL。
 
@@ -75,7 +75,7 @@ Mockingbird 是一款 AI 原生的 Java 开发与 Mock 管理 IDE。
 | F09 | 内置 HTTP Mock Server | P0 |
 | F10 | Mock 路由配置与接管 | P0 |
 | F11 | Mock 请求调试与日志 | P0 |
-| F12 | Mock 配置保存、版本与回滚 | P0 |
+| F12 | Mock 配置保存与管理 | P0 |
 | F13 | 底部工具面板及任务状态 | P0 |
 
 ### 2.2 MVP 技术边界
@@ -487,26 +487,20 @@ AI：
 - 运行中的任务可以取消。
 - 从 AI 对话中可直接定位对应的底部日志。
 
-### F11 — Mock 保存与回滚
+### F11 — Mock 保存与管理
 
 **用户故事**
 
-作为用户，我希望随时恢复到之前的 Mock 配置，避免 AI 修改破坏已有测试场景。
+作为用户，我希望编辑、审核并保存当前 Mock 配置，自行管理测试场景与备份。
 
 **功能要求**
 
-- 保存 Mock 规则。
-- 每次 AI 批量更新生成 ChangeSet。
+- 保存当前 Mock 规则。
 - 支持查看变更 Diff。
 - 支持撤销未发布修改。
-- 支持恢复之前的 Mock 规则版本。
-- 保存依赖路由配置。
-- 支持恢复上一次已保存的环境配置。
+- 保存当前依赖路由配置。
 - 保存时记录对应项目版本信息。
-
-**回滚边界**
-
-只恢复 Mockingbird 管理的规则、路由和启动配置，不对真实外部服务已经产生的操作提供回滚承诺。
+- 用户自行编辑、导出和备份 Mock，不保存历史环境版本。
 
 ---
 
@@ -560,7 +554,7 @@ AI：
 5. 用户检查并应用配置。
 6. 用户运行项目及目标 API。
 7. 底部 Requests 展示命中情况。
-8. 用户可以编辑、重新测试或回滚。
+8. 用户可以编辑、保存并重新测试。
 
 ---
 
@@ -608,16 +602,6 @@ MVP 至少需要以下数据模型：
 - Validation Status
 - Version
 
-**Environment Snapshot**
-
-- Snapshot ID
-- Project Revision
-- Workflow ID
-- Route Configuration
-- Mock Rule Versions
-- Launch Configuration
-- Created At
-
 **Agent Task**
 
 - Task ID
@@ -658,7 +642,6 @@ MVP 至少需要以下数据模型：
 - 新规则必须验证成功才能发布。
 - Mock Server 意外退出后给出错误提示。
 - Agent 失败不得破坏当前 Workspace。
-- Snapshot 恢复操作必须有错误处理。
 - 项目代码变更后能够提示 Flow 分析结果可能已过期。
 
 ---
@@ -727,13 +710,12 @@ Mockingbird Desktop
 ├── Dependency Graph Engine
 ├── Mock Generation Engine
 ├── Route Manager
-├── Snapshot Manager
 │
 └── Local Mock Runtime
     └── WireMock Server
 ```
 
-**架构原则：** AI 负责分析和生成建议；确定性的本地执行引擎负责校验、Mock 发布、路由和回滚。
+**架构原则：** AI 负责分析和生成建议；确定性的本地执行引擎负责校验、Mock 发布和路由。
 
 ---
 
@@ -755,9 +737,9 @@ Mockingbird Desktop
 
 集成 WireMock，实现启动、停止、请求命中及日志查看。
 
-### Milestone 5 — Routing & Rollback
+### Milestone 5 — Routing & Persistence
 
-实现配置覆盖、Mock/Real 切换、变更预览、Snapshot 与恢复。
+实现配置覆盖、Mock/Real 切换、变更预览与当前配置保存。
 
 ### Milestone 6 — End-to-End Validation
 
@@ -790,8 +772,8 @@ Mockingbird Desktop
 6. 通过受支持的配置覆盖方式接管这些依赖。
 7. 调用入口 API，确认 Mock 被命中。
 8. 修改银行 Mock 响应，重新测试。
-9. 回滚到之前的 Mock 和路由配置。
-10. 再次执行并验证恢复后的行为。
+9. 用户手动修改 Mock 响应并切换路由配置。
+10. 再次执行并验证修改后的行为。
 
 **通过条件**
 
@@ -801,7 +783,7 @@ Mockingbird Desktop
 - 能明确展示依赖识别证据和未确认项。
 - 所有 Mock 变更可查看、编辑和保存。
 - 有效 Mock 能在本地 Server 正常运行。
-- 受支持的路由切换和回滚能够重复执行。
+- 受支持的路由切换和 Mock 编辑能够重复执行。
 - Agent 或 Mock Server 失败时，界面不会丢失已有工作结果。
 
 ---
@@ -817,7 +799,7 @@ Mockingbird Desktop
 | Mock 修改 | 单个 Mock 可通过图形界面或 AI 修改 |
 | Flow 可解释性 | 每个识别出的下游依赖可查看来源证据 |
 | Mock 执行 | 支持重复执行相同确定性场景 |
-| 环境恢复 | 受控路由与规则变更可以恢复 |
+| 配置保存 | 当前路由与规则保存后可重新打开 |
 | Agent 兼容 | Codex 和 OpenCode 均通过端到端验收 |
 
 核心验证指标不是 AI 生成多少代码，而是：
