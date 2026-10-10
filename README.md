@@ -83,6 +83,7 @@ Codex / OpenCode / Grok 通过各自模型服务工作。AI 可按需读取隔�
 ```sh
 npm test           # 核心、依赖发现、源码生成、导出与模型发现测试
 npm run test:e2e   # 真实 WireMock + Spring Boot 端到端流程
+npm run test:runtime # JDK 分块 POST 与 HTTP/2 降级兼容性（需要 JDK 和 WireMock）
 npm run test:agent # 已登录 Codex 的分析、生成、审核和取消
 npm run test:grok  # 已登录 Grok 的分析、生成、审核和取消
 npx tsx scripts/verify-source-generation.ts  # 可选：去掉 contract 后用真实 Grok 4.7 生成一条成功候选，不发布

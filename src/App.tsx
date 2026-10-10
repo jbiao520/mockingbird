@@ -90,7 +90,7 @@ export default function App(){
     const move=(ev:globalThis.PointerEvent)=>{if(kind==='left')setLeftWidth(Math.max(205,Math.min(420,start+ev.clientX-startX)));else if(kind==='right')setRightWidth(Math.max(275,Math.min(500,start+startX-ev.clientX)));else setBottomHeight(Math.max(120,Math.min(window.innerHeight*0.5,start+startY-ev.clientY)));};
     document.body.classList.add('resizing');window.addEventListener('pointermove',move);window.addEventListener('pointerup',()=>{window.removeEventListener('pointermove',move);document.body.classList.remove('resizing');},{once:true});
   };
-  const previewRoutes=(routes:Record<string,'mock'|'real'>)=>void run('预览路由',async()=>{const result=await api('/routes/preview',{routes});setRoutePreview({routes,...result.preview});});
+  const previewRoutes=(routes:Record<string,'mock'|'real'>)=>void run('预览路由',async()=>{const result=await api('/routes/preview',{routes,launchPort});setRoutePreview({routes,...result.preview});});
   const oneRoute=(dep:Dependency,value:'real'|'mock')=>{const routes:Record<string,'real'|'mock'>={};for(const d of allDeps)if(d.id===dep.id||(dep.configKey&&d.configKey===dep.configKey))routes[d.id]=value;previewRoutes(routes);};
   const allRoutes=(value:'mock'|'real')=>previewRoutes(Object.fromEntries(allDeps.filter(d=>value==='real'||(d.configKey&&d.status!=='unresolved')).map(d=>[d.id,value])));
   const testMock=(rule:MockRule)=>{setTestTarget('mock');setTestMethod(rule.method);setTestPath(rule.path.replace(/\{[^}]+\}/g,'u_001')+(Object.keys(rule.query).length?'?'+new URLSearchParams(rule.query):''));setTestBody(pretty(rule.requestBody??{userId:'u_001',sku:'sku_001',quantity:1,amount:128}));setTestHeaders(pretty(rule.requestHeaders));setTestResult(null);openKind('request');};

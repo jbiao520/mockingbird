@@ -47,7 +47,7 @@ export async function createServer(options:Options,port=4317){
     if(options.saveExport){const savedPath=await options.saveExport(artifact);return{savedPath,cancelled:!savedPath};}
     return artifact;
   }));
-  app.post('/api/routes/preview',handle(req=>workbench.setRoutes(req.body.routes||{})));
+  app.post('/api/routes/preview',handle(req=>workbench.setRoutes(req.body.routes||{},Number(req.body.launchPort||18080))));
   app.post('/api/routes/apply',handle(req=>workbench.applyRoutes(req.body.routes||{}),true));
   app.post('/api/snapshots',handle(req=>workbench.snapshot(String(req.body.name||'')),true));
   app.post('/api/snapshots/restore',handle(req=>workbench.restore(req.body.id),true));

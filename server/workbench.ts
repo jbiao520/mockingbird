@@ -170,7 +170,7 @@ export class Workbench extends EventEmitter{
     for(const task of this.agentManager.tasks)if(task.proposal?.length&&task.proposal.every(r=>next.some(n=>n.id===r.id)))task.approved=true;
     this.problems=[];this.changed();return next;
   }
-  async setRoutes(input:Record<string,'real'|'mock'>){
+  async setRoutes(input:Record<string,'real'|'mock'>,launchPort=18080){
     const changes=z.record(z.string(),z.enum(['real','mock'])).parse(input);
     const ws=structuredClone(this.workspace);
     const deps=ws.workflows.flatMap(w=>w.dependencies);
@@ -179,7 +179,7 @@ export class Workbench extends EventEmitter{
       if(route==='mock'&&(!dep.configKey||dep.status==='unresolved'))throw new Error(`${dep.name} 无法自动路由：URL 未解析或没有可覆盖的配置项`);
       dep.route=route;
     }
-    const preview=await routePreview(ws,this.runtime.state.port);return {workspace:ws,preview};
+    const preview=await routePreview(ws,this.runtime.state.port,launchPort);return {workspace:ws,preview};
   }
   async applyRoutes(input:Record<string,'real'|'mock'>){
     const {workspace:ws,preview}=await this.setRoutes(input);const original=(await routePreview(this.workspace,this.runtime.state.port)).config;

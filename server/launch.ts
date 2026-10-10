@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Workspace } from '../shared/types';
 import { exists } from './analyzer';
+import { buildEnvironment, resolveBuildExecutable } from './build-environment';
 
 const shellQuote=(value:string)=>/^[\w./:=@-]+$/.test(value)?value:"'"+value.replaceAll("'","'\\''")+"'";
 const xmlText=(xml:string,tag:string)=>new RegExp(`<${tag}\\s*>([\\s\\S]*?)</${tag}>`).exec(xml)?.[1].trim();
@@ -45,8 +46,9 @@ export async function projectLaunchCommand(ws:Workspace,port=18080){
   const location=path.join(root,'.mockingbird/routes.properties');
   const runArgs=`--spring.config.additional-location=${pathToFileURL(location).href} --server.port=${port} --server.address=127.0.0.1`;
   let executable:string,args:string[];
+  const env=await buildEnvironment();
   const wrapper=ws.project.build==='Maven'?'mvnw':'gradlew';
-  executable=await exists(path.join(root,wrapper))?path.join(root,wrapper):await exists(path.join(module,wrapper))?path.join(module,wrapper):ws.project.build==='Maven'?'mvn':'gradle';
+  executable=await exists(path.join(root,wrapper))?path.join(root,wrapper):await exists(path.join(module,wrapper))?path.join(module,wrapper):await resolveBuildExecutable(ws.project.build==='Maven'?'mvn':'gradle',env);
   if(ws.project.build==='Maven'){
     const pom=path.join(module,'pom.xml');
     if(xmlText((await fs.readFile(pom,'utf8')).replace(/<!--[\s\S]*?-->/g,''),'packaging')==='pom')throw new Error('Flow 对应聚合模块，无法启动；请选择应用模块中的 API Flow');
@@ -55,5 +57,5 @@ export async function projectLaunchCommand(ws:Workspace,port=18080){
     const task=module===root?'bootRun':':'+path.relative(root,module).split(path.sep).join(':')+':bootRun';
     args=[task,`--args=${runArgs}`];
   }
-  return{executable,args,cwd:root,location,module,command:[executable,...args].map(shellQuote).join(' ')};
+  return{executable,args,cwd:root,location,module,env,command:[executable,...args].map(shellQuote).join(' ')};
 }
