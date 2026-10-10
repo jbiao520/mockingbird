@@ -1,0 +1,14 @@
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { loader } from '@monaco-editor/react';
+import * as monaco from 'monaco-editor/editor/editor.api.js';
+import 'monaco-editor/languages/definitions/java/register.js';
+import 'monaco-editor/language/json/monaco.contribution.js';
+import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
+import JsonWorker from 'monaco-editor/language/json/json.worker.js?worker';
+import App from './App';
+import '@xyflow/react/dist/style.css';
+import './styles.css';
+(globalThis as any).MonacoEnvironment={getWorker(_:string,label:string){return label==='json'?new JsonWorker():new EditorWorker();}};
+loader.config({monaco});
+createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

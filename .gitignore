@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+runtime/*.jar
+runtime/*.part
+.mockingbird/
+**/.mockingbird/
+**/target/
+playwright-report/
+test-results/
+artifacts/
+.DS_Store
+.idea/
+*.iml

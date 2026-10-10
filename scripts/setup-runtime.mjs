@@ -1,0 +1,17 @@
+import { mkdir, writeFile, rename, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+const version='3.13.2';
+const directory=path.resolve('runtime');
+await mkdir(directory,{recursive:true});
+const filename=`wiremock-standalone-${version}.jar`;
+const base=`https://repo.maven.apache.org/maven2/org/wiremock/wiremock-standalone/${version}/${filename}`;
+console.log(`Installing WireMock ${version} from Maven Central (SHA-512 verified)…`);
+const [jar,checksum]=await Promise.all([fetch(base),fetch(base+'.sha512')]);
+if(!jar.ok||!checksum.ok)throw new Error('WireMock download failed');
+const bytes=Buffer.from(await jar.arrayBuffer()),expected=(await checksum.text()).trim().split(/\s/)[0];
+if(createHash('sha512').update(bytes).digest('hex')!==expected)throw new Error('Checksum mismatch');
+const target=path.join(directory,filename);
+await writeFile(target+'.part',bytes);await rename(target+'.part',target);
+await writeFile(path.join(directory,'manifest.json'),JSON.stringify({version,filename,sha512:expected},null,2));
+console.log(`Ready: ${target}`);

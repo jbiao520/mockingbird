@@ -1,0 +1,29 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import net from 'node:net';
+import { once } from 'node:events';
+import type { MockRule,RequestLog,RuntimeStatus } from '../shared/types';
+import { mapping,validateRules } from './rules';
+import { exists } from './analyzer';
+export function redact(s:string){return s.replace(/Bearer\s+[\w.\-]+/gi,'Bearer [REDACTED]').replace(/((?:password|secret|token|api[_-]?key|authorization)\s*["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi,'$1[REDACTED]');}
+export async function assertPort(port:number){if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('端口必须为 1024–65535');const s=net.createServer();await new Promise<void>((resolve,reject)=>{s.once('error',()=>reject(new Error(`端口 ${port} 已被占用`)));s.listen(port,'127.0.0.1',()=>s.close(()=>resolve()));});}
+export function terminate(c:ChildProcess){if(!c.pid)return;try{if(process.platform==='win32')c.kill();else process.kill(-c.pid,'SIGTERM');}catch{c.kill();}const timer=setTimeout(()=>{try{if(process.platform!=='win32')process.kill(-c.pid!,'SIGKILL');else c.kill('SIGKILL');}catch{}},2500);timer.unref();c.once('close',()=>clearTimeout(timer));}
+export class MockRuntime{
+  state:RuntimeStatus={status:'stopped',port:9090,ready:false,logs:[]};child?:ChildProcess;private auth='';
+  constructor(public jar:string,private cwd:string,private changed:()=>void){}
+  async init(){this.state.ready=await exists(this.jar)&&(await fs.stat(this.jar)).size>1000000;}
+  private log(s:string){this.state.logs.push(redact(s));this.state.logs=this.state.logs.slice(-300);this.changed();}
+  async admin(endpoint:string,method='GET',data?:unknown){const res=await fetch(`http://127.0.0.1:${this.state.port}/__admin/${endpoint}`,{method,headers:{'Content-Type':'application/json',Authorization:'Basic '+this.auth},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(5000)});if(!res.ok)throw new Error(`WireMock ${endpoint}: HTTP ${res.status}`);const content=await res.text();return content?JSON.parse(content):{};}
+  async start(port:number,rules:MockRule[]){
+    if(this.child)throw new Error('Mock Server 已启动或正在启动');validateRules(rules);await assertPort(port);await this.init();if(!this.state.ready)throw new Error('WireMock 未安装，请运行 npm run setup:runtime');await fs.mkdir(this.cwd,{recursive:true});
+    const password=randomBytes(24).toString('hex');this.auth=Buffer.from('mockingbird:'+password).toString('base64');this.state={...this.state,status:'starting',port,error:undefined,logs:[]};this.changed();
+    const child=spawn(process.env.JAVA_PATH||'java',['-jar',this.jar,'--port',String(port),'--bind-address','127.0.0.1','--root-dir',this.cwd,'--admin-api-basic-auth','mockingbird:'+password,'--disable-banner'],{detached:process.platform!=='win32',stdio:['ignore','pipe','pipe']});this.child=child;let spawnError:Error|undefined;
+    child.stdout?.on('data',b=>this.log(b.toString().replaceAll(password,'[REDACTED]')));child.stderr?.on('data',b=>this.log(b.toString().replaceAll(password,'[REDACTED]')));
+    child.on('error',e=>{spawnError=e;this.state.status='failed';this.state.error=e.message;this.child=undefined;this.changed();});child.on('close',code=>{if(this.child===child){this.child=undefined;if(this.state.status!=='stopped'){this.state.status='failed';this.state.error=`WireMock 意外退出（${code}）`;this.changed();}}});
+    try{for(let i=0;i<120;i++){if(spawnError)throw spawnError;if(child.exitCode!==null)throw new Error('WireMock 启动失败：'+this.state.logs.slice(-3).join(''));try{await this.admin('mappings');await this.publish(rules);this.state.status='running';this.changed();return;}catch(e){if(i===119)throw e;}await new Promise(r=>setTimeout(r,250));}}catch(e){await this.stop();this.state.status='failed';this.state.error=(e as Error).message;this.changed();throw e;}
+  }
+  async publish(rules:MockRule[]){const valid=validateRules(rules);if(!this.child)return;await this.admin('mappings/import','POST',{mappings:valid.filter(r=>r.enabled).map(mapping),importOptions:{duplicatePolicy:'OVERWRITE',deleteAllNotInImport:true}});}
+  async requests():Promise<RequestLog[]>{if(this.state.status!=='running')return[];const data=await this.admin('requests');return(data.requests||[]).slice(0,200).map((r:any)=>({id:r.id,method:r.request.method,url:r.request.url,status:r.response?.status||r.responseDefinition?.status||404,matched:Boolean(r.wasMatched),rule:r.stubMapping?.name,at:r.request.loggedDateString||new Date(r.request.loggedDate).toISOString(),body:redact(r.request.body||''),response:redact(r.response?.body||''),duration:r.timing?.totalTime}));}
+  async stop(){const child=this.child;this.child=undefined;this.state.status='stopped';this.state.error=undefined;this.changed();if(child){const done=once(child,'close').catch(()=>{});terminate(child);await Promise.race([done,new Promise(r=>setTimeout(r,3500))]);}}
+}

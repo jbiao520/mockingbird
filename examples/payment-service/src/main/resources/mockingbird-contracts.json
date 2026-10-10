@@ -1,0 +1,6 @@
+{
+  "GET /users/{userId}": {"id":"u_001","name":"Alex Chen","active":true},
+  "POST /inventory/reserve": {"reservationId":"res_001","available":true},
+  "POST /risk/check": {"riskLevel":"LOW","approved":true},
+  "POST /bank/charge": {"transactionId":"txn_001","approved":true,"message":"Payment approved"}
+}
