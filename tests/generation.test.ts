@@ -80,6 +80,26 @@ process.stdout.write(JSON.stringify({text:JSON.stringify(result),stopReason:'end
 function evidenceFor(dep:Dependency){return[{file:dep.evidence.file,line:dep.evidence.line,reason:`${dep.name} 的调用约束响应字段`}];}
 function generated(deps:Dependency[],bodies:unknown[],summary='按调用分支生成'){return{summary,rules:deps.map((dep,index)=>({dependencyId:dep.id,status:200,body:JSON.stringify(bodies[index]),basis:`${dep.name} 满足请求的分支`,evidence:evidenceFor(dep),assumptions:['示例标识符来自调用参数命名，不是运行结果'],unresolved:[]}))};}
 
+test('AI behavior candidates stay editable and are exercised before approval',async()=>{
+  const ctx=await setup();
+  try{
+    const bank=ctx.deps.find(dep=>dep.name.includes('Bank'))!;
+    const result=generated([bank],[{transactionId:'txn_001',approved:true,message:'ok'}]);
+    const behavior={schemaVersion:1,sample:{path:bank.path,headers:{},body:{amount:88}},matchers:[],exceptions:[],bindings:[
+      {target:'/transactionId',value:{kind:'uuid',variable:'transactionId'}},
+      {target:'/approved',value:{kind:'condition',condition:{source:'body',field:'/amount',operator:'lt',value:1000},then:true,otherwise:false}}
+    ],cases:[{id:'large',name:'大额拒绝',patch:{body:{amount:1500}},expected:{matched:true,status:200,fields:{'/approved':false}},calls:1}]};
+    await ctx.writeResult({...result,rules:result.rules.map(row=>({...row,behavior:JSON.stringify(behavior)}))});
+    const task=await ctx.bench.generateWithAgent({workflowId:ctx.wf.id,dependencyIds:[bank.id],scenario:'custom',customScenario:'按金额返回',instructions:'使用随机 ID，大额拒绝',agent:'grok'});
+    await ctx.wait(task);assert.equal(task.status,'completed',task.error);
+    assert.deepEqual(task.proposal?.[0].behavior,behavior);assert.equal(ctx.bench.workspace.rules.length,0);
+    await ctx.bench.approveTask(task.id);assert.deepEqual(ctx.bench.workspace.rules[0].behavior,behavior);
+    const reports=await ctx.bench.previewBehavior({rules:ctx.bench.workspace.rules,ruleId:ctx.bench.workspace.rules[0].id});
+    assert.equal(reports.reports[0].passed,true);assert.equal((reports.reports[0].calls[0].body as any).approved,false);
+    assert.match((reports.reports[0].calls[0].body as any).transactionId,/^[\da-f-]{36}$/);
+  }finally{await ctx.close();}
+});
+
 test('Scoped source generation covers exactly the selected dependencies and keeps the current workflow',async()=>{
   const ctx=await setup();
   try{

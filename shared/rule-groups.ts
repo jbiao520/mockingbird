@@ -7,12 +7,14 @@ function canonical(value:unknown):string{
   return JSON.stringify(value)??'undefined';
 }
 export function overlaps(a:MockRule,b:MockRule){
+  if((a.priority??5)!==(b.priority??5))return false;
   if(a.method!==b.method)return false;
   const left=mockRequestPath(a).split('/'),right=mockRequestPath(b).split('/');if(left.length!==right.length)return false;
   if(!left.every((segment,i)=>segment===right[i]||/\{[^}]+\}/.test(segment)||/\{[^}]+\}/.test(right[i])))return false;
   const disjoint=(x:Record<string,string>,y:Record<string,string>)=>Object.keys(x).some(key=>key in y&&x[key]!==y[key]);
   const headers=(input:Record<string,string>)=>Object.fromEntries(Object.entries(input).map(([key,value])=>[key.toLowerCase(),value]));
   if(disjoint(a.query,b.query)||disjoint(headers(a.requestHeaders),headers(b.requestHeaders)))return false;
+  if(a.bodyMatchMode==='partial'||b.bodyMatchMode==='partial'||a.behavior?.matchers.length||b.behavior?.matchers.length)return true;
   return a.requestBody===undefined||b.requestBody===undefined||canonical(a.requestBody)===canonical(b.requestBody);
 }
 export function ruleGroups(rules:MockRule[]){

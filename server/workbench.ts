@@ -16,12 +16,14 @@ import { routePreview, writeRoutes, ProjectLauncher } from './routes';
 import { compute } from './analysis';
 import { generateRequestTemplate, validateEntryRequest } from './request-shape';
 import { confirmDependency, pruneWorkflow } from './dependencies';
+import { BehaviorPreviewer } from './behavior-preview';
+import { behaviorCaseSchema } from './behavior-schema';
 const exec=promisify(execFile);
 function dependencyFingerprint(wf:Workflow,ids:string[]){return ids.map(id=>{const dep=wf.dependencies.find(item=>item.id===id);return dep?`${dep.id}\t${dep.method}\t${dep.path}\t${dep.responseType||''}\t${dep.status}\t${dep.configKey||''}\t${dep.originalBase||''}`:`missing:${id}`;}).join('\n');}
 export interface Options { root:string; dataDir:string; runtimeDir?:string; samplePath?:string; desktop?:boolean; chooseDirectory?:()=>Promise<string|null>;saveExport?:(artifact:{filename:string;content:string})=>Promise<string|null> }
 export class Workbench extends EventEmitter{
   workspace:Workspace=emptyWorkspace();index?:Index;
-  runtime:MockRuntime;launcher:ProjectLauncher;agents:State['agents']=[];agentManager:AgentManager;
+  runtime:MockRuntime;previewer:BehaviorPreviewer;launcher:ProjectLauncher;agents:State['agents']=[];agentManager:AgentManager;
   recent:State['recent']=[];problems:string[]=[];terminal:string[]=[];
   indexing?:string;
   private watcher?:FSWatcher;
@@ -29,6 +31,7 @@ export class Workbench extends EventEmitter{
   private mutationTail:Promise<unknown>=Promise.resolve();
   constructor(public options:Options){
     super();this.runtime=new MockRuntime(path.join(options.runtimeDir||path.join(options.root,'runtime'),'wiremock-standalone-3.13.2.jar'),path.join(options.dataDir,'wiremock'),()=>this.changed());
+    this.previewer=new BehaviorPreviewer(this.runtime.jar);
     this.launcher=new ProjectLauncher(()=>this.changed());
     this.agentManager=new AgentManager(()=>this.changed(),async task=>{
       this.addMessage('assistant',task.status==='completed'?task.summary||'任务完成':task.status==='cancelled'?'任务已取消':`Agent 任务失败：${task.error}`,task.id,task.proposal?.length?'mocks':this.activeWorkflowSafe()?'workflow':undefined);
@@ -164,6 +167,11 @@ export class Workbench extends EventEmitter{
     for(const task of this.agentManager.tasks)if(task.proposal?.length&&!task.approved&&task.revision&&task.proposal.some(proposal=>rules.some(rule=>rule.id===proposal.id)))this.assertTaskFresh(task);
     for(const rule of rules){if(!dependencies.some(d=>d.id===rule.dependencyId))throw new Error(`规则 ${rule.name} 对应的依赖已不存在，请重新生成`);if(rule.evidence?.length)assertSourceEvidence(rule.evidence,this.requireIndex());}
     validateResponseContracts(rules,dependencies,this.requireIndex());
+    for(const rule of rules.filter(r=>r.enabled&&r.behavior)){
+      const reports=await this.previewer.run(rules,rule.id,undefined,this.requireIndex(),dependencies);
+      const failures=reports.flatMap(report=>report.calls.flatMap(call=>call.errors.map(e=>report.name+'：'+e)));
+      if(failures.length)throw new Error(rule.name+' 行为验证未通过：'+failures.join('；'));
+    }
     const previous=this.workspace.rules;
     const next=rules.map(r=>{const before=previous.find(p=>p.id===r.id);return{...r,version:before&&JSON.stringify({...before,version:0})!==JSON.stringify({...r,version:0})?before.version+1:before?.version||1};});
     await this.runtime.publish(next);
@@ -225,6 +233,10 @@ export class Workbench extends EventEmitter{
     task.approved=true;this.changed();
   }
   requestTemplate(entryId:string){return generateRequestTemplate(this.requireFreshIndex(),entryId);}
+  async previewBehavior(input:unknown){
+    const data=z.object({rules:z.unknown(),ruleId:z.string(),cases:z.array(behaviorCaseSchema).min(1).max(30).optional()}).parse(input);
+    return{reports:await this.previewer.run(data.rules as MockRule[],data.ruleId,data.cases,this.requireIndex(),this.workspace.workflows.flatMap(w=>w.dependencies))};
+  }
   async testRequest(input:{target:'mock'|'project';method:string;path:string;body?:unknown;headers?:Record<string,string>;entryId?:string;revision?:string}){
     const data=z.object({target:z.enum(['mock','project']),method:z.enum(['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']),path:z.string().startsWith('/').max(2000),body:z.json().optional(),headers:z.record(z.string(),z.string()).optional(),entryId:z.string().optional(),revision:z.string().optional()}).parse(input);
     if(data.path.startsWith('//')||data.path.startsWith('/__admin')||data.path.includes('://'))throw new Error('请求路径非法');
@@ -242,5 +254,5 @@ export class Workbench extends EventEmitter{
     this.terminal.push('$ '+command);try{const result=await exec(spec[0],spec[1],{cwd:this.index?.project.path||this.options.root,timeout:10000,maxBuffer:1024*1024});this.terminal.push(redact(result.stdout+result.stderr));}catch(e){this.terminal.push(redact((e as Error).message));}this.terminal=this.terminal.slice(-100);this.changed();
   }
   source(relative:string){return readSource(this.requireIndex(),relative);}
-  async close(){this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.runtime.stop(),this.launcher.stop()]);}
+  async close(){this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.previewer.close(),this.runtime.stop(),this.launcher.stop()]);}
 }

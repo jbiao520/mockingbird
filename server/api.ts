@@ -42,6 +42,10 @@ export async function createServer(options:Options,port=4317){
   app.post('/api/rules/generate',handle(req=>({rules:workbench.generate(req.body.ids,req.body.scenario,req.body.workflowId)})));
   app.post('/api/rules/generate/ai',handle(req=>workbench.generateWithAgent(req.body),true));
   app.put('/api/rules',handle(req=>workbench.setRules(req.body.rules),true));
+  app.post('/api/rules/preview',handle(req=>workbench.previewBehavior(req.body),true));
+  app.post('/api/runtime/sequence/reset',handle(req=>{
+    const rule=workbench.workspace.rules.find(r=>r.id===req.body.ruleId);if(!rule)throw new Error('行为不存在');return workbench.runtime.resetSequence(rule);
+  },true));
   app.post('/api/rules/export',handle(async req=>{
     const artifact=exportMocks(req.body.rules??workbench.workspace.rules,req.body.format,workbench.workspace.project?.name,workbench.runtime.state.port,req.body.includeDisabled===true,workbench.workspace.workflows.flatMap(w=>w.dependencies));
     if(options.saveExport){const savedPath=await options.saveExport(artifact);return{savedPath,cancelled:!savedPath};}
