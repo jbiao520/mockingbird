@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
-import type { State, Workspace, MockRule, Task, Message, Workflow } from '../shared/types';
+import type { Entry, State, Workspace, MockRule, Task, Message, Workflow } from '../shared/types';
 import { readSource, propertyForSource, type Index } from './analyzer';
 import { emptyWorkspace, saveWorkspace, loadWorkspace, atomicWrite } from './storage';
 import { MockRuntime, redact } from './runtime';
@@ -18,6 +18,7 @@ import { compute } from './analysis';
 import { generateRequestTemplate, validateEntryRequest } from './request-shape';
 import { resolveEntryContextPath } from './entry-runtime';
 import { confirmDependency, pruneWorkflow } from './dependencies';
+import { buildManualEntry, mergeManualEntries } from './entries';
 import { BehaviorPreviewer } from './behavior-preview';
 import { ruleFingerprint } from '../shared/rule-edit';
 import { behaviorCaseSchema } from './behavior-schema';
@@ -43,7 +44,8 @@ export class Workbench extends EventEmitter{
     this.regression=new RegressionRunner(this.runtime.jar,()=>this.changed());
     this.launcher=new ProjectLauncher(()=>this.changed());
     this.agentManager=new AgentManager(()=>this.changed(),task=>this.enqueueMutation(async()=>{
-      this.addMessage('assistant',task.status==='completed'?task.summary||'任务完成':task.status==='cancelled'?'任务已取消':`Agent 任务失败：${task.error}`,task.id,task.proposal?.length?'mocks':this.activeWorkflowSafe()?'workflow':undefined);
+      const action=task.kind==='entry-discovery'?undefined:task.proposal?.length?'mocks':this.activeWorkflowSafe()?'workflow':undefined;
+      this.addMessage('assistant',task.status==='completed'?task.summary||'任务完成':task.status==='cancelled'?'任务已取消':`Agent 任务失败：${task.error}`,task.id,action);
       await saveWorkspace(this.workspace);this.changed();
     }));
   }
@@ -70,6 +72,13 @@ export class Workbench extends EventEmitter{
   serial<T>(fn:()=>Promise<T>):Promise<T>{return this.enqueueMutation(()=>{if(this.lifetime.signal.aborted)throw new Error('项目正在关闭');return fn();});}
   track<T>(fn:()=>Promise<T>):Promise<T>{if(this.lifetime.signal.aborted)return Promise.reject(new Error('项目正在关闭'));const run=Promise.resolve().then(fn);this.requests.add(run);void run.finally(()=>this.requests.delete(run)).catch(()=>{});return run;}
   requireIndex(){if(!this.index)throw new Error('请先导入 Java 项目');return this.index;}
+  private installIndex(index:Index,base:Workspace=this.workspace){
+    const previous=base.manualEntries||[];
+    const merged=mergeManualEntries(index,previous);
+    this.index=merged.index;
+    this.workspace={...base,project:merged.index.project,manualEntries:merged.manual};
+    return{dropped:merged.dropped,changed:JSON.stringify(previous)!==JSON.stringify(merged.manual)};
+  }
   activeWorkflow(){const wf=this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId);if(!wf)throw new Error('请先分析 API Flow');return wf;}
   addMessage(role:Message['role'],content:string,taskId?:string,action?:Message['action']){this.workspace.messages.push({id:randomUUID(),role,content:redact(content),at:new Date().toISOString(),taskId,action});this.workspace.messages=this.workspace.messages.slice(-100);}
   async importProject(projectPath:string){
@@ -79,13 +88,47 @@ export class Workbench extends EventEmitter{
     try{index=await compute<Index>(this.options.root,'index',{path:projectPath},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}
     const loaded=await loadWorkspace(index.project.path);
     await this.runtime.stop();await this.launcher.stop();
-    this.index=index;this.workspace={...loaded,project:index.project};this.agentManager.tasks=[];
+    const installed=this.installIndex(index,loaded);this.agentManager.tasks=[];
     const routeFile=path.join(index.project.path,'.mockingbird/routes.properties');
     try{const config=await fs.readFile(routeFile,'utf8'),savedPort=/=http:\/\/127\.0\.0\.1:(\d+)/.exec(config)?.[1];if(savedPort)this.runtime.state.port=Number(savedPort);}catch{/* routes not yet applied */}
-    if(this.workspace.workflows.some(w=>w.revision!==index.project.revision))this.problems=['源码发生变化，保存的 Flow 可能过期，请重新分析'];else this.problems=[];
+    this.problems=[...(this.workspace.workflows.some(w=>w.revision!==index.project.revision)?['源码发生变化，保存的 Flow 可能过期，请重新分析']:[]),...installed.dropped.slice(0,5)];
+    if(installed.changed)await saveWorkspace(this.workspace);
     if(!this.options.managed){this.recent=[{name:index.project.name,path:index.project.path,openedAt:new Date().toISOString()},...this.recent.filter(r=>r.path!==index.project.path)].slice(0,12);await atomicWrite(path.join(this.options.dataDir,'recent.json'),this.recent);}this.watchProject();this.changed();return this.state();
   }
-  async reindex(){let index:Index;this.indexing='重新索引';this.changed();try{index=await compute<Index>(this.options.root,'index',{path:this.requireIndex().project.path},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}this.index=index;this.workspace.project=index.project;this.problems=this.workspace.workflows.some(w=>w.revision!==index.project.revision)?['源码发生变化，Flow 已过期，请核对依赖并确认源码版本']:[];this.watchProject();this.changed();return this.state();}
+  async reindex(){let index:Index;this.indexing='重新索引';this.changed();try{index=await compute<Index>(this.options.root,'index',{path:this.requireIndex().project.path},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}const installed=this.installIndex(index);this.problems=[...(this.workspace.workflows.some(w=>w.revision!==index.project.revision)?['源码发生变化，Flow 已过期，请核对依赖并确认源码版本']:[]),...installed.dropped.slice(0,5)];if(installed.changed)await saveWorkspace(this.workspace);this.watchProject();this.changed();return this.state();}
+  async discoverEntries(input:unknown){
+    const parsed=z.object({prompt:z.string().trim().min(1).max(4000),agent:z.string().min(1),model:z.string().max(200).optional(),effort:z.string().max(100).optional()}).parse(input);
+    if(parsed.agent==='local')throw new Error('发现入口必须选择已安装的 CLI');
+    const index=this.requireFreshIndex(),info=this.agents.find(agent=>agent.id===parsed.agent);
+    if(!info?.installed||!info.path)throw new Error('所选 Agent 未安装');
+    this.workspace.selectedAgent=info.id;this.addMessage('user',`发现入口 API：${parsed.prompt}`);await saveWorkspace(this.workspace);
+    return this.agentManager.run(info,parsed.prompt,index,this.workspace,parsed.model,undefined,parsed.effort,undefined,true);
+  }
+  async acceptEntries(input:unknown){
+    const data=z.object({taskId:z.string().min(1),selected:z.array(z.object({index:z.number().int().min(0).max(99),method:z.enum(['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']),path:z.string().trim().min(1).max(2000)})).min(1).max(100)}).parse(input);
+    const index=this.requireFreshIndex(),task=this.agentManager.tasks.find(item=>item.id===data.taskId);
+    if(!task||task.kind!=='entry-discovery'||task.status!=='completed'||!task.entryProposal)throw new Error('没有可提交的入口候选');
+    if(task.approved)throw new Error('这些候选已经提交');
+    if(task.revision!==index.project.revision)throw new Error('AI 候选绑定的源码版本已过期，请重新发现');
+    if(new Set(data.selected.map(item=>item.index)).size!==data.selected.length)throw new Error('入口候选重复');
+    const built:Entry[]=[],skipped:{index:number;reason:string}[]=[],seen=new Set(index.project.entries.map(entry=>`${entry.method} ${entry.path}`));
+    for(const item of data.selected){
+      const draft=task.entryProposal[item.index];
+      if(!draft)throw new Error('入口候选不存在');
+      let entry:Entry;
+      try{entry=buildManualEntry(index,{...draft,method:item.method,path:item.path});}
+      catch(error){throw new Error(`候选 ${item.index+1}：${(error as Error).message}`);}
+      const key=`${entry.method} ${entry.path}`;
+      if(seen.has(key)){skipped.push({index:item.index,reason:key+' 已在入口列表中'});continue;}
+      seen.add(key);built.push(entry);
+    }
+    if(!built.length)throw new Error(skipped.map(item=>item.reason).join('；')||'没有可提交的入口');
+    const merged=mergeManualEntries(index,[...(this.workspace.manualEntries||[]),...built]);
+    const ws={...this.workspace,manualEntries:merged.manual,project:merged.index.project};
+    await saveWorkspace(ws);this.workspace=ws;this.index=merged.index;
+    task.approved=true;task.acceptedEntries=data.selected.map(item=>item.index);this.changed();
+    return{accepted:built.filter(entry=>merged.manual.some(item=>item.id===entry.id)),skipped};
+  }
   async analyzeEntry(id:string){
     const index=this.requireFreshIndex(),old=this.workspace.workflows.find(w=>w.entry.id===id);
     const entry=index.project.entries.find(e=>e.id===id);if(!entry)throw new Error('API 入口不存在，请重新索引');

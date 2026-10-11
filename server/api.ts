@@ -52,6 +52,8 @@ export async function createServer(options:Options,port=4317){
   router.put('/view',handle(req=>projects.saveView(String(req.params.projectId),req.body)));
   router.post('/reindex',handle((_req,workbench)=>workbench.reindex(),true));
   router.get('/source',handle(async(req,workbench)=>({source:await workbench.source(String(req.query.path||''))})));
+  router.post('/entries/discover',handle(async(req,workbench)=>{if(req.body.agent==='local')throw new Error('发现入口必须选择已安装的 CLI');return workbench.discoverEntries({...req.body,...await projects.agentOptions(req.body.agent,req.body.model,req.body.effort)});},true));
+  router.post('/entries/accept',handle((req,workbench)=>workbench.acceptEntries(req.body),true));
   router.post('/workflows/analyze',handle((req,workbench)=>workbench.analyzeEntry(req.body.entryId),true));
   router.post('/workflows/dependencies',handle((req,workbench)=>workbench.saveDependency(req.body.workflowId,req.body.dependency,req.body.dependencyId,req.body.taskId,req.body.candidateIndex),true));
   router.post('/workflows/dependencies/remove',handle((req,workbench)=>workbench.removeDependency(req.body.workflowId,req.body.dependencyId),true));

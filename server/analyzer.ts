@@ -5,6 +5,7 @@ import { parse } from 'java-parser';
 import YAML from 'yaml';
 import type { Project, JavaMethod, FileNode, Entry, Workflow, HttpMethod } from '../shared/types';
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex').slice(0,16);
+export function entryId(methodId:string,routePath:string){return hash(methodId+routePath);}
 const lineAt=(s:string,n:number)=>s.slice(0,n).split('\n').length;
 const ignored=new Set(['.git','.idea','.gradle','target','build','node_modules','.mockingbird','.settings','dist']);
 export async function exists(p:string){try{await fs.access(p);return true;}catch{return false;}}
@@ -78,10 +79,10 @@ export async function indexProject(input:string,progress?:(message:string)=>void
       if(depthAt(balance,classOpen,m.index!)!==1||['if','for','while','switch','catch','new','return'].includes(m[3])||m[2]==='new'||m[3]===className)continue;
       const open=m.index!+m[0].length-1,end=m[5]==='{'?closeAt(source,open):open,id=`${className}.${m[3]}@${file}:${lineAt(source,m.index!)}`;
       methods.push({id,className,name:m[3],returnType:m[2].trim(),parameters:m[4],body:m[5]==='{'?source.slice(open+1,end):'',file,line:lineAt(source,m.index!),annotations:m[1],fields,start:open+1,end});
-      if(/@(RestController|Controller)\b/.test(header)){const route=mapping(m[1]);if(route)entries.push({id:hash(id+route.path),method:route.method,path:joinPath(mapping(header)?.path||'',route.path),className,name:m[3],file,line:lineAt(source,m.index!),methodId:id});}
+      if(/@(RestController|Controller)\b/.test(header)){const route=mapping(m[1]);if(route)entries.push({id:entryId(id,route.path),method:route.method,path:joinPath(mapping(header)?.path||'',route.path),className,name:m[3],file,line:lineAt(source,m.index!),methodId:id});}
     }
   }
-  if(!entries.length)warnings.push('未识别到 Spring MVC 入口。首版支持直接注解的 Controller，继承和组合注解需人工确认。');
+  if(!entries.length)warnings.push('未识别到 Spring MVC 入口。直接注解的 Controller 会自动列出；继承、组合注解和自定义路由请使用「AI 发现入口」确认。');
   const buildSource=await fs.readFile(path.join(root,build==='Maven'?'pom.xml':await exists(path.join(root,'build.gradle'))?'build.gradle':'build.gradle.kts'),'utf8');
   const javaVersion=/<java.version>(.*?)<|<maven.compiler.(?:source|release)>(.*?)<|JavaLanguageVersion.of\((\d+)\)|VERSION_(\d+)/.exec(buildSource)?.slice(1).find(Boolean)||'未声明';
   let contracts:Record<string,unknown>={};try{contracts=JSON.parse(await fs.readFile(path.join(root,'src/main/resources/mockingbird-contracts.json'),'utf8'));}catch{/* optional samples */}

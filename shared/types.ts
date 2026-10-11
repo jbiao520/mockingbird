@@ -3,6 +3,7 @@ export interface RequestTemplate { entryId:string;revision:string;method:HttpMet
 export interface Evidence { file:string;line:number;snippet:string;kind:'static'|'manual'|'ai';note:string }
 export interface JavaMethod { id:string;className:string;name:string;returnType:string;parameters:string;body:string;file:string;line:number;annotations:string;fields:Record<string,string>;start:number;end:number }
 export interface Entry { id:string;method:HttpMethod;path:string;className:string;name:string;file:string;line:number;methodId:string }
+export interface EntryDraft { method:HttpMethod;path:string;className:string;name:string;file:string;line:number;note:string }
 export interface DependencyDraft { name:string;client:string;method:HttpMethod;path:string;originalBase:string;configKey:string;responseType:string;file:string;line:number;note:string;callChain:{file:string;line:number}[] }
 export interface Dependency { id:string;name:string;client:string;method:HttpMethod;path:string;url:string;configKey?:string;originalBase?:string;sourceMethod:string;evidence:Evidence;status:'static'|'confirmed'|'unresolved';reason?:string;route:'real'|'mock';responseType?:string }
 export interface Workflow { id:string;entry:Entry;methods:Array<Pick<JavaMethod,'id'|'className'|'name'|'file'|'line'>>;edges:{source:string;target:string;label?:string}[];dependencies:Dependency[];revision:string;analyzedAt:string;warnings:string[] }
@@ -38,12 +39,12 @@ export interface MockRule { id:string;dependencyId:string;name:string;scenario:s
 export interface GenerationScope { dependencyIds:string[];scenario:'success'|'rejection'|'custom';scenarioName:string;instructions:string;model?:string;effort?:string;fingerprint:string }
 export interface RuleEditScope { rule:MockRule;savedFingerprint:string;dependencyFingerprint:string }
 export interface Message { id:string;role:'user'|'assistant';content:string;at:string;taskId?:string;action?:'workflow'|'mocks'|'routes' }
-export interface Task { id:string;agent:string;prompt:string;status:'running'|'completed'|'failed'|'cancelled';startedAt:string;endedAt?:string;output:string;error?:string;proposal?:MockRule[];summary?:string;approved?:boolean;dependencyProposal?:DependencyDraft[];acceptedDependencies?:number[];workflowId?:string;revision?:string;model?:string;effort?:string;kind?:'chat'|'generate'|'rule-edit';generation?:GenerationScope;ruleEdit?:RuleEditScope }
+export interface Task { id:string;agent:string;prompt:string;status:'running'|'completed'|'failed'|'cancelled';startedAt:string;endedAt?:string;output:string;error?:string;proposal?:MockRule[];summary?:string;approved?:boolean;dependencyProposal?:DependencyDraft[];acceptedDependencies?:number[];entryProposal?:EntryDraft[];acceptedEntries?:number[];workflowId?:string;revision?:string;model?:string;effort?:string;kind?:'chat'|'generate'|'rule-edit'|'entry-discovery';generation?:GenerationScope;ruleEdit?:RuleEditScope }
 export interface RunConfig { profiles:string;env:string;jvm:string;module:string;args:string }
 export interface ConfigLayer { label:string;value:string;wins:boolean }
 export interface ConfigResolution { key:string;layers:ConfigLayer[];effective:string;plain:string;mockWins:boolean;note?:string }
 export interface LaunchExplanation { profiles:string[];profileSource:string;module:string;warnings:string[];command:string;env:{key:string;value:string}[];resolutions:ConfigResolution[] }
-export interface Workspace { project:Project|null;workflows:Workflow[];activeWorkflowId?:string;rules:MockRule[];messages:Message[];selectedAgent:string;flowScenarios?:FlowScenario[];runConfig?:RunConfig }
+export interface Workspace { project:Project|null;workflows:Workflow[];activeWorkflowId?:string;rules:MockRule[];messages:Message[];selectedAgent:string;flowScenarios?:FlowScenario[];runConfig?:RunConfig;manualEntries?:Entry[] }
 export interface RequestLog { id:string;method:string;url:string;status:number;matched:boolean;rule?:string;ruleId?:string;headers?:Record<string,string>;fault?:string;at:string;body?:string;response?:string;duration?:number }
 export type DiagnosisDimension = 'method'|'path'|'header'|'query'|'body'|'sequence'|'enabled';
 export type DiagnosisStatus = 'match'|'mismatch'|'unconstrained'|'skipped';
