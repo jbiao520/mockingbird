@@ -3,7 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Workspace } from '../shared/types';
 import { validateRules } from './rules';
-export const emptyWorkspace=():Workspace=>({project:null,workflows:[],rules:[],messages:[],selectedAgent:'local'});
+import { emptyRunConfig, normalizeRunConfig } from './runtime-config';
+export const emptyWorkspace=():Workspace=>({project:null,workflows:[],rules:[],messages:[],selectedAgent:'local',flowScenarios:[],runConfig:emptyRunConfig()});
 export async function atomicWrite(file:string,value:unknown){
   await fs.mkdir(path.dirname(file),{recursive:true});const tmp=file+'.'+randomUUID()+'.tmp';
   try{await fs.writeFile(tmp,typeof value==='string'?value:JSON.stringify(value,null,2),{mode:0o600});await fs.rename(tmp,file);}finally{await fs.rm(tmp,{force:true});}
@@ -15,6 +16,7 @@ export async function loadWorkspace(root:string){
     // Only load supported fields; retired workspace data is discarded on the next save.
     const ws=Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,saved[key]??value])) as unknown as Workspace;
     ws.activeWorkflowId=saved.activeWorkflowId;
+    try{ws.runConfig=normalizeRunConfig(saved.runConfig??{});}catch{ws.runConfig=emptyRunConfig();}
     const dependencies=ws.workflows.flatMap(w=>w.dependencies);
     ws.rules=validateRules(ws.rules,dependencies);
     return ws;

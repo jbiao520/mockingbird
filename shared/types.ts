@@ -6,6 +6,20 @@ export interface Entry { id:string;method:HttpMethod;path:string;className:strin
 export interface DependencyDraft { name:string;client:string;method:HttpMethod;path:string;originalBase:string;configKey:string;responseType:string;file:string;line:number;note:string;callChain:{file:string;line:number}[] }
 export interface Dependency { id:string;name:string;client:string;method:HttpMethod;path:string;url:string;configKey?:string;originalBase?:string;sourceMethod:string;evidence:Evidence;status:'static'|'confirmed'|'unresolved';reason?:string;route:'real'|'mock';responseType?:string }
 export interface Workflow { id:string;entry:Entry;methods:Array<Pick<JavaMethod,'id'|'className'|'name'|'file'|'line'>>;edges:{source:string;target:string;label?:string}[];dependencies:Dependency[];revision:string;analyzedAt:string;warnings:string[] }
+export interface FlowScenario {
+  id:string;workflowId:string;name:string;revision:string;dependencyFingerprint:string;
+  request:{method:HttpMethod;path:string;headers:Record<string,string>;body?:unknown};
+  mocks:{dependencyId:string;ruleId:string;fingerprint:string;name?:string;calls?:number}[];
+  expected:{status:number;fields:Record<string,unknown>};updatedAt:string;
+}
+export interface RegressionResult {
+  scenarioId:string;name:string;status:'pending'|'running'|'passed'|'failed'|'blocked'|'cancelled';duration?:number;
+  errors:string[];response?:{status:number;body:string;truncated?:boolean};requests?:RequestLog[];requestCount?:number;
+}
+export interface RegressionRun {
+  id:string;workflowId:string;status:'preparing'|'running'|'cleaning'|'completed'|'failed'|'cancelled';startedAt:string;endedAt?:string;
+  results:RegressionResult[];scenarios:FlowScenario[];logs:string[];error?:string;
+}
 export interface FileNode { name:string;path:string;directory:boolean;children?:FileNode[] }
 export interface Project { id:string;name:string;path:string;build:'Maven'|'Gradle';javaVersion:string;modules:string[];files:FileNode[];entries:Entry[];indexedAt:string;revision:string;warnings:string[];fileCount:number }
 export interface RuleEvidence { file:string;line:number;reason:string }
@@ -25,13 +39,23 @@ export interface GenerationScope { dependencyIds:string[];scenario:'success'|'re
 export interface RuleEditScope { rule:MockRule;savedFingerprint:string;dependencyFingerprint:string }
 export interface Message { id:string;role:'user'|'assistant';content:string;at:string;taskId?:string;action?:'workflow'|'mocks'|'routes' }
 export interface Task { id:string;agent:string;prompt:string;status:'running'|'completed'|'failed'|'cancelled';startedAt:string;endedAt?:string;output:string;error?:string;proposal?:MockRule[];summary?:string;approved?:boolean;dependencyProposal?:DependencyDraft[];acceptedDependencies?:number[];workflowId?:string;revision?:string;model?:string;effort?:string;kind?:'chat'|'generate'|'rule-edit';generation?:GenerationScope;ruleEdit?:RuleEditScope }
-export interface Workspace { project:Project|null;workflows:Workflow[];activeWorkflowId?:string;rules:MockRule[];messages:Message[];selectedAgent:string }
+export interface RunConfig { profiles:string;env:string;jvm:string;module:string;args:string }
+export interface ConfigLayer { label:string;value:string;wins:boolean }
+export interface ConfigResolution { key:string;layers:ConfigLayer[];effective:string;plain:string;mockWins:boolean;note?:string }
+export interface LaunchExplanation { profiles:string[];profileSource:string;module:string;warnings:string[];command:string;env:{key:string;value:string}[];resolutions:ConfigResolution[] }
+export interface Workspace { project:Project|null;workflows:Workflow[];activeWorkflowId?:string;rules:MockRule[];messages:Message[];selectedAgent:string;flowScenarios?:FlowScenario[];runConfig?:RunConfig }
 export interface RequestLog { id:string;method:string;url:string;status:number;matched:boolean;rule?:string;ruleId?:string;headers?:Record<string,string>;fault?:string;at:string;body?:string;response?:string;duration?:number }
+export type DiagnosisDimension = 'method'|'path'|'header'|'query'|'body'|'sequence'|'enabled';
+export type DiagnosisStatus = 'match'|'mismatch'|'unconstrained'|'skipped';
+export interface DiagnosisClause { id:string;dimension:DiagnosisDimension;status:DiagnosisStatus;summary:string;optional?:boolean;proposal?:{label:string;defaultSelected:boolean} }
+export interface DiagnosisCandidate { id:string;ruleId:string;name:string;scenario:string;variantLabel:string;enabled:boolean;pathMatched:boolean;methodMatched:boolean;failedClauses:number;matchedClauses:number;priority:number;clauses:DiagnosisClause[] }
+export interface UnmatchedDiagnosis { message:string;scope:'ranked'|'similar'|'outside'|'empty';candidates:DiagnosisCandidate[] }
+export interface DiagnosisAdoption { rule:MockRule;created:boolean;summary:string;baseFingerprint:string }
 export interface RuntimeStatus { status:'stopped'|'starting'|'running'|'failed';port:number;error?:string;ready:boolean;logs:string[] }
 export interface LaunchStatus { status:'stopped'|'starting'|'running'|'failed';port:number;logs:string[];error?:string;config?:string;stale?:boolean }
 export interface AgentInfo { id:string;installed:boolean;version?:string;path?:string;error?:string }
 export interface AgentModel { id:string;name:string;isDefault?:boolean;efforts?:string[];defaultEffort?:string;disabled?:boolean }
-export interface State { workspace:Workspace;runtime:RuntimeStatus;launch:LaunchStatus;tasks:Task[];agents:AgentInfo[];recent:{name:string;path:string;openedAt:string}[];problems:string[];terminal:string[];samplePath:string;desktop:boolean;indexing?:string }
+export interface State { workspace:Workspace;runtime:RuntimeStatus;launch:LaunchStatus;tasks:Task[];agents:AgentInfo[];recent:{name:string;path:string;openedAt:string}[];problems:string[];terminal:string[];samplePath:string;desktop:boolean;indexing?:string;regression?:RegressionRun }
 export interface OpenProject { id:string;name:string;path:string;runtime:Pick<RuntimeStatus,'status'|'port'>;launch:Pick<LaunchStatus,'status'|'port'>;runningTasks:number;ownerId?:string;closing:boolean }
 export interface ApplicationState { projects:OpenProject[];recent:State['recent'];agents:AgentInfo[];samplePath:string;desktop:boolean;runtimeReady:boolean;selectedModels:Record<string,string> }
 export interface ProjectView { schemaVersion:1;values:Record<string,unknown> }

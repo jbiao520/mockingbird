@@ -32,7 +32,7 @@ try{
   await bench.setRules(rules);pass('Request matchers','Query, header and JSON body matched; mismatches returned 404 and appeared in journal');
   const routes=Object.fromEntries(wf.dependencies.map(d=>[d.id,'mock' as const]));const preview=await bench.setRoutes(routes);assert.equal(preview.preview.changes.length,4);await bench.applyRoutes(routes);pass('Routing','4 Spring property overrides saved');
   await bench.launcher.start(bench.workspace,18180);await waitLaunch();
-  const template=bench.requestTemplate(entry.id);assert.equal(template.path,request.path);
+  const template=await bench.requestTemplate(entry.id);assert.equal(template.path,request.path);
   const entryRequest={...template,...request};
   await assert.rejects(()=>bench.testRequest({...entryRequest,path:'/api/payment/create'}),/偏离入口/);
   const first=await bench.testRequest(entryRequest);assert.equal(first.status,200);assert.equal(JSON.parse(first.body).status,'COMPLETED');

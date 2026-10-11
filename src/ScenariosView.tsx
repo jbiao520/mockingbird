@@ -1,0 +1,60 @@
+import { useEffect, useState } from 'react';
+import { Plus, Play, Square, Save, Copy, Trash2, ListChecks, Loader2 } from 'lucide-react';
+import type { FlowScenario, HttpMethod, RegressionRun, RequestTemplate, State, Workflow } from '../shared/types';
+import { scenarioStaleReason } from '../shared/regression';
+import { useProjectApi, useViewState } from './project-session';
+
+export type ScenarioSeed={request:FlowScenario['request'];status?:number};
+type Draft={id?:string;name:string;method:HttpMethod;path:string;body:string;headers:string;status:string;fields:string;mocks:Record<string,{ruleId:string;calls:string}>};
+const pretty=(value:unknown)=>JSON.stringify(value,null,2);
+const labels:Record<string,string>={pending:'待执行',running:'执行中',passed:'通过',failed:'失败',blocked:'阻塞',cancelled:'已取消',preparing:'准备环境',cleaning:'清理环境',completed:'已完成'};
+export default function ScenariosView({workflow,state,seed,onConsume,onRefresh}:{workflow:Workflow;state:State;seed?:ScenarioSeed;onConsume:()=>void;onRefresh:()=>Promise<void>}){
+  const api=useProjectApi(),rules=state.workspace.rules,scenarios=(state.workspace.flowScenarios||[]).filter(s=>s.workflowId===workflow.id);
+  const [draft,setDraft]=useViewState<Draft|null>('scenarioDraft:'+workflow.id,null);
+  const [selected,setSelected]=useViewState<string[]|null>('scenarioSelection:'+workflow.id,null);
+  const [savedReport,setSavedReport]=useState<RegressionRun|undefined>(),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const currentRun=state.regression;
+  const running=!!currentRun&&['preparing','running','cleaning'].includes(currentRun.status);
+  const report=currentRun?.workflowId===workflow.id&&(!savedReport||currentRun.startedAt>=savedReport.startedAt)?currentRun:savedReport;
+  const selectedIds=selected===null?scenarios.map(s=>s.id):selected.filter(id=>scenarios.some(s=>s.id===id));
+  useEffect(()=>{let active=true;void api<{report?:RegressionRun}>('/regression/report?workflowId='+encodeURIComponent(workflow.id)).then(r=>{if(active)setSavedReport(r.report);}).catch(e=>{if(active)setError((e as Error).message);});return()=>{active=false;};},[workflow.id,api]);
+  const action=async(fn:()=>Promise<void>)=>{setError('');setBusy(true);try{await fn();await onRefresh();}catch(e){setError((e as Error).message);}finally{setBusy(false);}};
+  const newDraft=(request:FlowScenario['request'],status=200):Draft=>({name:'新场景',method:request.method,path:request.path,body:request.body===undefined?'':pretty(request.body),headers:pretty(request.headers),status:String(status),fields:'{}',mocks:Object.fromEntries(workflow.dependencies.map(dep=>{const available=rules.filter(r=>r.dependencyId===dep.id);return[dep.id,{ruleId:(available.find(r=>r.enabled)||available[0])?.id||'',calls:''}];}))});
+  useEffect(()=>{if(seed){setDraft(newDraft(seed.request,seed.status));onConsume();}},[seed]);
+  const create=()=>void action(async()=>{const template=await api<RequestTemplate>('/requests/template',{entryId:workflow.entry.id});setDraft(newDraft(template));});
+  const edit=(scenario:FlowScenario,copy=false)=>{
+    setError('');setDraft({...newDraft(scenario.request,scenario.expected.status),id:copy?undefined:scenario.id,name:scenario.name+(copy?' · 副本':''),fields:pretty(scenario.expected.fields),mocks:Object.fromEntries(scenario.mocks.map(m=>[m.dependencyId,{ruleId:m.ruleId,calls:m.calls===undefined?'':String(m.calls)}]))});
+  };
+  const update=(patch:Partial<Draft>)=>setDraft(old=>old?{...old,...patch}:old);
+  const save=()=>void action(async()=>{
+    if(!draft)return;
+    const headers=JSON.parse(draft.headers),fields=JSON.parse(draft.fields);
+    if(!headers||typeof headers!=='object'||Array.isArray(headers)||!fields||typeof fields!=='object'||Array.isArray(fields))throw new Error('Headers 和响应字段断言必须是 JSON 对象');
+    const scenario=await api<FlowScenario>('/scenarios',{id:draft.id,workflowId:workflow.id,name:draft.name,request:{method:draft.method,path:draft.path,headers,...(!['GET','HEAD'].includes(draft.method)&&draft.body.trim()?{body:JSON.parse(draft.body)}:{})},expected:{status:Number(draft.status),fields},mocks:workflow.dependencies.map(dep=>{const mock=draft.mocks[dep.id];return{dependencyId:dep.id,ruleId:mock?.ruleId||'',...(mock?.calls.trim()?{calls:Number(mock.calls)}:{})};})});
+    setDraft(old=>old?{...old,id:scenario.id}:old);setSelected(null);
+  });
+  const run=(ids:string[])=>void action(async()=>{await api('/regression/run',{workflowId:workflow.id,scenarioIds:ids});});
+  const failedIds=(report?.results||[]).filter(r=>r.status==='failed'&&scenarios.some(s=>s.id===r.scenarioId)).map(r=>r.scenarioId);
+  return <div className="scenarios-view scrollable">
+    <div className="view-heading"><div><div className="eyebrow">FLOW / REGRESSION</div><h2>场景集 <span className="badge blue">{scenarios.length} 个场景</span></h2><code>{workflow.entry.method} {workflow.entry.path}</code></div><div className="button-row"><button disabled={busy} onClick={create}><Plus size={14}/>新建场景</button>{running?<button onClick={()=>void action(async()=>{await api('/regression/cancel',{});})}><Square size={13}/>取消回归</button>:<button className="primary" disabled={busy||!selectedIds.length} onClick={()=>run(selectedIds)}><Play size={14}/>运行回归 ({selectedIds.length})</button>}</div></div>
+    <p className="scenario-note">每个依赖选择一条已保存的 Mock。回归自动启动独立 Java / WireMock，使用临时路由；首次运行可能需要构建项目。数据库等外部资源沿用项目配置，请使用测试数据。入口返回后采集下游调用，暂不支持异步后台任务断言。</p>
+    {error&&<div className="editor-error" role="alert">{error}</div>}
+    <div className="scenario-grid"><section className="scenario-list"><div className="content-label">已保存的场景<button onClick={()=>setSelected(selectedIds.length===scenarios.length?[]:null)} disabled={!scenarios.length}>{selectedIds.length===scenarios.length?'清空选择':'全选'}</button></div>
+      {!scenarios.length&&<div className="scenario-empty"><ListChecks size={25}/><strong>保存一份可重复验证的 Flow</strong><p>选择下游 Mock 组合，填写入口请求和预期结果。</p><button onClick={create} disabled={busy}>新建第一个场景</button></div>}
+      {scenarios.map(s=>{const stale=scenarioStaleReason(s,workflow,rules,state.workspace.project!.revision),result=report?.results.find(r=>r.scenarioId===s.id);return <div className={`scenario-row ${draft?.id===s.id?'selected':''}`} key={s.id}><input type="checkbox" aria-label={'回归场景 '+s.name} checked={selectedIds.includes(s.id)} onChange={e=>setSelected(e.target.checked?[...selectedIds,s.id]:selectedIds.filter(id=>id!==s.id))}/><button className="scenario-name" onClick={()=>edit(s)}><strong>{s.name}</strong><small>{stale||`${s.mocks.length} 个下游 · HTTP ${s.expected.status}`}</small></button><span className={`badge ${stale?'warning':result?.status==='passed'?'green':result?.status==='failed'?'warning':''}`}>{stale?'待复核':result?labels[result.status]:'未执行'}</span><button aria-label={'复制场景 '+s.name} onClick={()=>edit(s,true)}><Copy size={13}/></button><button aria-label={'删除场景 '+s.name} disabled={busy||running} onClick={()=>void action(async()=>{await api('/scenarios/remove',{id:s.id});if(draft?.id===s.id)setDraft(null);})}><Trash2 size={13}/></button></div>;})}
+    </section><section className="scenario-editor">{draft?<><div className="content-label">{draft.id?'编辑场景':'新建场景'}<button onClick={()=>setDraft(null)}>收起</button></div>
+      <label className="field">场景名称<input aria-label="场景名称" value={draft.name} maxLength={100} onChange={e=>update({name:e.target.value})}/></label>
+      <div className="section-label">入口请求</div><div className="form-grid"><label className="field">方法<select aria-label="场景请求方法" value={draft.method} onChange={e=>update({method:e.target.value as HttpMethod})}>{['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m=><option key={m}>{m}</option>)}</select></label><label className="field grow">路径与 Query<input aria-label="场景请求路径" value={draft.path} onChange={e=>update({path:e.target.value})}/></label></div>
+      <label className="field">Headers · JSON<textarea aria-label="场景请求 Headers" rows={2} value={draft.headers} onChange={e=>update({headers:e.target.value})}/></label>
+      {!['GET','HEAD'].includes(draft.method)&&<label className="field">Body · JSON<textarea aria-label="场景请求 Body" rows={5} value={draft.body} onChange={e=>update({body:e.target.value})}/></label>}
+      <div className="section-label">下游 Mock 组合</div>{workflow.dependencies.map(dep=>{const mock=draft.mocks[dep.id]||{ruleId:'',calls:''},available=rules.filter(r=>r.dependencyId===dep.id);const change=(patch:Partial<typeof mock>)=>update({mocks:{...draft.mocks,[dep.id]:{...mock,...patch}}});return <div className="scenario-mock" key={dep.id}><label className="field grow">{dep.name}<select aria-label={'场景 Mock '+dep.name} value={mock.ruleId} onChange={e=>change({ruleId:e.target.value})}><option value="">选择 Mock</option>{mock.ruleId&&!available.some(r=>r.id===mock.ruleId)&&<option value={mock.ruleId}>已删除的规则</option>}{available.map(r=><option key={r.id} value={r.id}>{r.scenario} · {r.name} · HTTP {r.status}</option>)}</select></label><label className="field scenario-count">调用次数<input type="number" min="0" step="1" placeholder="不检查" aria-label={'调用次数 '+dep.name} value={mock.calls} onChange={e=>change({calls:e.target.value})}/></label></div>;})}
+      <div className="section-label">入口响应断言</div><label className="field">HTTP 状态<input aria-label="场景预期状态" type="number" min="100" max="599" value={draft.status} onChange={e=>update({status:e.target.value})}/></label><label className="field">响应字段 · JSON Pointer → 期望值<textarea aria-label="场景响应断言" rows={4} placeholder={'{"/status":"COMPLETED"}'} value={draft.fields} onChange={e=>update({fields:e.target.value})}/></label><p className="scenario-note">例如 {`{"/status":"COMPLETED"}`}。只检查列出的字段；调用次数 0 表示不应调用，留空表示不检查。</p>
+      <button className="primary" disabled={busy||running||!draft.name.trim()} onClick={save}><Save size={14}/>保存场景</button><small className="scenario-save-note">保存会绑定当前源码、依赖和 Mock 内容；修改后请先核对，再保存更新。</small>
+    </>:<div className="scenario-empty"><ListChecks size={25}/><strong>选择场景查看或编辑</strong><p>也可以从 HTTP Client 保存当前入口请求。</p></div>}</section></div>
+    {report&&<section className="regression-report"><div className="view-heading"><div><div className="eyebrow">LAST REGRESSION</div><h2>{labels[report.status]} <span className="badge">{report.results.filter(r=>r.status==='passed').length}/{report.results.length} 通过</span></h2><small>{new Date(report.startedAt).toLocaleString('zh-CN')}</small></div><button disabled={busy||running||!failedIds.length} onClick={()=>run(failedIds)}><Play size={13}/>重跑失败项 ({failedIds.length})</button></div>
+      {report.error&&<div className="editor-error">{report.error}</div>}
+      {report.results.map(result=><details className="regression-result" key={result.scenarioId} open={result.status==='failed'||result.status==='blocked'}><summary><span className={`badge ${result.status==='passed'?'green':result.status==='failed'||result.status==='blocked'?'warning':''}`}>{result.status==='running'&&<Loader2 size={12} className="spin"/>}{labels[result.status]}</span><strong>{result.name}</strong><span className="spacer"/><small>{result.duration===undefined?'':result.duration+' ms'}</small>{scenarios.find(s=>s.id===result.scenarioId)?.updatedAt!==report.scenarios.find(s=>s.id===result.scenarioId)?.updatedAt&&<small>场景已修改，需重跑</small>}</summary><div className="regression-detail">{result.errors.map((e,i)=><p className="error-text" key={i}>{e}</p>)}{result.response&&<><div className="section-label">入口响应 · HTTP {result.response.status}</div><pre>{result.response.body}</pre>{result.response.truncated&&<small>响应展示已截断，断言使用完整响应。</small>}</>}{result.requests&&<><div className="section-label">下游调用 · {result.requestCount??result.requests.length} 次（最多展示 200 条）</div>{result.requests.map(r=><div className="regression-request" key={r.id}><span className={`status-dot ${r.matched?'green':'amber'}`}/><code>{r.method} {r.url}</code><span>{r.rule||'未命中'} · {r.status}</span></div>)}</>}</div></details>)}
+      <details className="regression-logs"><summary>回归启动日志</summary><pre>{report.logs.join('')}</pre></details>
+    </section>}
+  </div>;
+}

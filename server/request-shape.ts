@@ -59,14 +59,14 @@ function contract(index:Index,entryId:string){
   });
   return{entry,bindings};
 }
-function entryRequestPath(index:Index,entry:{file:string;path:string}){
-  const prefix=(propertyForSource(index,'server.servlet.context-path',entry.file)||'').trim();
+function entryRequestPath(index:Index,entry:{file:string;path:string},contextPath?:string){
+  const prefix=(contextPath??propertyForSource(index,'server.servlet.context-path',entry.file)??'').trim();
   if(!prefix||prefix==='/')return entry.path;
   if(!prefix.startsWith('/')||/[?#{}\s\\]|\/\/|(?:^|\/)\.{1,2}(?:\/|$)/.test(prefix))throw new Error('server.servlet.context-path 未能解析为有效路径，请核对入口模块配置');
   return prefix.replace(/\/+$/,'')+entry.path;
 }
-export function generateRequestTemplate(index:Index,entryId:string):RequestTemplate{
-  const {entry,bindings}=contract(index,entryId),warnings:string[]=[],headers:Record<string,string>={},query=new URLSearchParams();let path=entryRequestPath(index,entry),body:unknown;
+export function generateRequestTemplate(index:Index,entryId:string,contextPath?:string):RequestTemplate{
+  const {entry,bindings}=contract(index,entryId),warnings:string[]=[],headers:Record<string,string>={},query=new URLSearchParams();let path=entryRequestPath(index,entry,contextPath),body:unknown;
   for(const binding of bindings){
     if(!binding.kind){warnings.push(`参数 ${binding.name} 的 Spring 绑定方式未确认，请手动填写`);continue;}
     const sample=visit(index,binding.type,undefined,binding.kind==='RequestBody'?'body':binding.name,[],warnings,true);
@@ -81,9 +81,9 @@ export function generateRequestTemplate(index:Index,entryId:string):RequestTempl
   if(path.includes('{'))warnings.push('部分路径参数未解析，请替换路径中的占位符');
   return{entryId,revision:index.project.revision,method:entry.method,path:path+(query.size?'?'+query:''),body,headers,warnings:[...new Set(warnings)]};
 }
-export function validateEntryRequest(index:Index,entryId:string,input:{method:string;path:string;body?:unknown;headers?:Record<string,string>}){
+export function validateEntryRequest(index:Index,entryId:string,input:{method:string;path:string;body?:unknown;headers?:Record<string,string>},contextPath?:string){
   const {entry,bindings}=contract(index,entryId);
-  const requestPath=entryRequestPath(index,entry);
+  const requestPath=entryRequestPath(index,entry,contextPath);
   const actual=new URL(input.path,'http://localhost').pathname;
   const pattern=requestPath.split(/(\{[^}]+\})/).map(p=>p.startsWith('{')?'[^/]+':p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('');
   if(input.method!==entry.method||!new RegExp('^'+pattern+'$').test(actual))throw new Error('请求方法或路径已偏离入口 API，请重新点击“验证入口 API”');

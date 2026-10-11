@@ -3,7 +3,9 @@ import path from 'node:path';
 import { Workbench, type Options } from './workbench';
 import { ProjectManager } from './projects';
 import { redact } from './runtime';
+import { adoptLoggedRequest, diagnoseLoggedRequest } from './request-diagnosis';
 import { exportMocks } from './exports';
+import { explainLaunch } from './routes';
 import type { Server } from 'node:http';
 
 export async function createServer(options:Options,port=4317){
@@ -67,14 +69,23 @@ export async function createServer(options:Options,port=4317){
     if(options.saveExport){const savedPath=await options.saveExport(artifact,client(req));return{savedPath,cancelled:!savedPath};}
     return artifact;
   }));
-  router.post('/routes/preview',handle((req,workbench)=>workbench.setRoutes(req.body.routes||{},Number(req.body.launchPort||workbench.launcher.state.port))));
-  router.post('/routes/apply',handle((req,workbench)=>workbench.applyRoutes(req.body.routes||{}),true));
+  router.post('/routes/preview',handle((req,workbench)=>workbench.setRoutes(req.body.routes||{},Number(req.body.launchPort||workbench.launcher.state.port),req.body.runConfig)));
+  router.post('/routes/apply',handle(async(req,workbench)=>{if(req.body.runConfig)await workbench.saveRunConfig(req.body.runConfig);return workbench.applyRoutes(req.body.routes||{});},true));
   router.post('/runtime/start',handle(async(req,workbench)=>{await projects.start(String(req.params.projectId),'mock',Number(req.body.port||workbench.runtime.state.port));},true));
   router.post('/runtime/stop',handle((_req,workbench)=>workbench.runtime.stop(),true));
   router.get('/requests',handle(async(_req,workbench)=>({requests:await workbench.runtime.requests()})));
   router.post('/requests/template',handle((req,workbench)=>workbench.requestTemplate(String(req.body.entryId||''))));
   router.post('/requests/test',handle((req,workbench)=>workbench.testRequest(req.body)));
-  router.post('/launch/start',handle((req,workbench)=>projects.start(String(req.params.projectId),'launch',Number(req.body.port||workbench.launcher.state.port)),true));
+  router.post('/requests/diagnose',handle((req,workbench)=>diagnoseLoggedRequest(workbench.runtime,workbench.workspace.rules,String(req.body.id||''))));
+  router.post('/requests/adopt',handle((req,workbench)=>adoptLoggedRequest(workbench.runtime,workbench.workspace.rules,req.body)));
+  router.post('/scenarios',handle((req,workbench)=>workbench.saveFlowScenario(req.body),true));
+  router.post('/scenarios/remove',handle((req,workbench)=>workbench.removeFlowScenario(req.body.id),true));
+  router.post('/regression/run',handle((req,workbench)=>workbench.runRegression(req.body),true));
+  router.post('/regression/cancel',handle((_req,workbench)=>workbench.regression.cancel()));
+  router.get('/regression/report',handle(async(req,workbench)=>({report:await workbench.regressionReport(String(req.query.workflowId||''))})));
+  router.put('/launch/config',handle((req,workbench)=>workbench.saveRunConfig(req.body),true));
+  router.post('/launch/explain',handle((req,workbench)=>{const launchPort=Number(req.body.launchPort||workbench.launcher.state.port);const ws=req.body.runConfig?{...workbench.workspace,runConfig:req.body.runConfig}:workbench.workspace;return explainLaunch(ws,launchPort);}));
+  router.post('/launch/start',handle(async(req,workbench)=>{if(req.body.runConfig)await workbench.saveRunConfig(req.body.runConfig);return projects.start(String(req.params.projectId),'launch',Number(req.body.port||workbench.launcher.state.port));},true));
   router.post('/launch/stop',handle((_req,workbench)=>workbench.launcher.stop(),true));
   router.post('/agents/run',handle(async(req,workbench)=>{const options=req.body.agent==='local'?{model:undefined,effort:undefined}:await projects.agentOptions(req.body.agent,req.body.model,req.body.effort);return workbench.chat(req.body.agent,req.body.prompt,options.model,req.body.workflowId,options.effort);},true));
   router.post('/agents/rule-edit',handle(async(req,workbench)=>{const options=await projects.agentOptions(req.body.agent,req.body.model,req.body.effort);return workbench.editRule({...req.body,...options});},true));

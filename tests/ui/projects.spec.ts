@@ -338,3 +338,66 @@ process.stdout.write(JSON.stringify({text:JSON.stringify(result),stopReason:'end
     expect(errors).toEqual([]);
   }finally{await service.close();await f.remove();}
 });
+
+test('Open tab context menus can close one tab, keep only the current tab, or close all',async({page})=>{
+  const f=await fixture(),service=await createServer({root:process.cwd(),dataDir:f.dataDir},0);
+  const third=path.join(f.temp,'service-c');
+  const projectTab=(name:string)=>page.locator('.project-tab').filter({has:page.getByRole('tab',{name,exact:true})});
+  const workspaceTab=(name:string)=>visible(page).locator('.workspace-tab').filter({hasText:name});
+  const item=(menu:string,name:string)=>page.getByRole('menu',{name:menu}).getByRole('menuitem',{name,exact:true});
+  try{
+    await fs.cp(f.roots[0],third,{recursive:true});
+    await page.goto(`http://127.0.0.1:${service.port}`);await openProject(page,f.roots[0]);
+    await expect(visible(page).locator('.project-root')).toContainText('service-a');
+    await workspaceTab('Overview').click({button:'right'});
+    await expect(item('工作区标签菜单','关闭')).toBeDisabled();
+    await expect(item('工作区标签菜单','仅保留当前')).toBeDisabled();
+    await expect(item('工作区标签菜单','关闭所有')).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('menu',{name:'工作区标签菜单'})).toHaveCount(0);
+    await source(page);await expect(visible(page).locator('.source-view .view-lines')).toContainText('SOURCE-A');
+    await visible(page).getByPlaceholder('Search files, APIs…').fill('pom.xml');
+    await visible(page).locator('.project-tree button[title="pom.xml"]').click();
+    await expect(workspaceTab('pom.xml')).toBeVisible();
+    await workspaceTab('pom.xml').click({button:'right'});
+    await item('工作区标签菜单','关闭').click();
+    await expect(workspaceTab('pom.xml')).toHaveCount(0);
+    await expect(workspaceTab('PaymentController.java')).toBeVisible();
+    await expect(workspaceTab('Overview')).toBeVisible();
+    await visible(page).getByPlaceholder('Search files, APIs…').fill('pom.xml');
+    await visible(page).locator('.project-tree button[title="pom.xml"]').click();
+    await workspaceTab('PaymentController.java').click({button:'right'});
+    await item('工作区标签菜单','仅保留当前').click();
+    await expect(visible(page).locator('.workspace-tab')).toHaveCount(1);
+    await expect(workspaceTab('PaymentController.java')).toBeVisible();
+    await expect(visible(page).locator('.source-view .view-lines')).toContainText('SOURCE-A');
+    await workspaceTab('PaymentController.java').click({button:'right'});
+    await item('工作区标签菜单','关闭所有').click();
+    await expect(visible(page).locator('.workspace-tab')).toHaveCount(1);
+    await expect(workspaceTab('Overview')).toBeVisible();
+    await projectTab('service-a').click({button:'right'});
+    await expect(item('项目标签菜单','仅保留当前')).toBeDisabled();
+    await expect(item('项目标签菜单','关闭')).toBeEnabled();
+    await page.keyboard.press('Escape');
+    for(const root of [f.roots[1],third])await openProject(page,root);
+    await expect(page.getByRole('tablist',{name:'已打开项目'}).getByRole('tab')).toHaveCount(3);
+    await visible(page).getByLabel('AI prompt',{exact:true}).fill('draft C');
+    await projectTab('service-b').click({button:'right'});
+    await item('项目标签菜单','仅保留当前').click();
+    await expect(page.getByRole('tab')).toHaveCount(1);
+    await expect(page.getByRole('tab',{name:'service-b',exact:true})).toHaveAttribute('aria-selected','true');
+    expect(service.projects.workbenches.size).toBe(1);
+    await openProject(page,third);
+    await expect(visible(page).locator('.project-root')).toContainText('service-c');
+    await expect(visible(page).getByLabel('AI prompt',{exact:true})).toHaveValue('draft C');
+    await projectTab('service-c').click({button:'right'});
+    await item('项目标签菜单','关闭').click();
+    await expect(page.getByRole('tab',{name:'service-c',exact:true})).toHaveCount(0);
+    await expect(page.getByRole('tab',{name:'service-b',exact:true})).toHaveAttribute('aria-selected','true');
+    await projectTab('service-b').click({button:'right'});
+    await item('项目标签菜单','关闭所有').click();
+    await expect(page.getByRole('tab')).toHaveCount(0);
+    await expect(visible(page).locator('.welcome')).toBeVisible();
+    expect(service.projects.workbenches.size).toBe(0);
+  }finally{await service.close();await f.remove();}
+});

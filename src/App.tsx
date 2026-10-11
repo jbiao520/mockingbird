@@ -75,10 +75,25 @@ export default function App(){
       await refresh();
     }finally{transition.current=false;setBusy('');}
   };
-  const closeProject=(id:string)=>void perform('关闭项目',async()=>{
-    await sessions.current.get(id)?.store.flush();await globalApi('/projects/'+id+'/close',{});
-    detach(id);setMenu(false);
+  const closeProjects=(targets:string[])=>void perform(targets.length>1?'关闭多个项目':'关闭项目',async()=>{
+    const closing=new Set(targets);
+    const open=[...sessions.current.keys()].filter(key=>key!=='welcome');
+    const remaining=open.filter(id=>!closing.has(id));
+    for(const id of open){
+      if(!closing.has(id))continue;
+      await sessions.current.get(id)?.store.flush();
+      await globalApi('/projects/'+id+'/close',{});
+      const session=sessions.current.get(id);session?.store.dispose();session?.controller.abort();sessions.current.delete(id);
+    }
+    setIds([...sessions.current.keys()].filter(key=>key!=='welcome'));
+    if(closing.has(activeId)){
+      const index=open.indexOf(activeId);
+      const neighbor=[...open.slice(index+1),...open.slice(0,index).reverse()].find(id=>remaining.includes(id));
+      changeActive(neighbor||'welcome');
+    }
+    setMenu(false);
   });
+  const closeProject=(id:string)=>closeProjects([id]);
   useEffect(()=>{
     let live=true;
     const initialize=async()=>{
@@ -131,7 +146,7 @@ export default function App(){
   </>}</div>;
   const tabProjects=ids.flatMap(id=>{const p=application.projects.find(p=>p.id===id&&(!p.ownerId||p.ownerId===clientId));return p?[p]:[];});
   return <div className="application-shell">
-    <ProjectTabs projects={tabProjects} activeId={activeId} busy={!!busy} onSwitch={switchProject} onClose={closeProject} onOpen={()=>window.dispatchEvent(new CustomEvent('mockingbird:open-project'))}/>
+    <ProjectTabs projects={tabProjects} activeId={activeId} busy={!!busy} onSwitch={switchProject} onClose={closeProject} onCloseMany={closeProjects} onOpen={()=>window.dispatchEvent(new CustomEvent('mockingbird:open-project'))}/>
     {[...sessions.current].map(([id,session])=><div key={id} id={'project-panel-'+id} role={id==='welcome'?undefined:'tabpanel'} aria-labelledby={id==='welcome'?undefined:'project-tab-'+id} className="project-container" hidden={id!==activeId}><ProjectSessionProvider session={{...session,active:id===activeId}}><ProjectWorkbench application={application} onOpen={open} onModels={updateModels} projectMenu={projectMenu}/></ProjectSessionProvider></div>)}
     {busy&&<div className="project-operation" role="status"><Loader2 size={14} className="spin"/>{busy}</div>}
     {error&&<div className="toast error" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={()=>setError('')}><X size={14}/></button></div>}

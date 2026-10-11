@@ -228,7 +228,13 @@ ${behaviorGuide}
     }catch(e){
       task.status='failed';task.error=redact((e as Error).message);task.endedAt=new Date().toISOString();
       if(temporaryDirectory)await fs.rm(temporaryDirectory,{recursive:true,force:true});
-      this.changed();await this.onComplete(task);throw e;
+      this.changed();
+      // Startup can fail inside a workbench mutation. Do not await a callback
+      // queued behind that mutation; stopAll still drains this completion.
+      const completion=this.onComplete(task).catch(error=>{task.error=redact((error as Error).message);this.changed();});
+      this.completions.set(task.id,completion);
+      void completion.finally(()=>this.completions.delete(task.id));
+      throw e;
     }
   }
   cancel(id:string){const child=this.running.get(id);if(!child)throw new Error('任务已结束');const task=this.tasks.find(t=>t.id===id)!;task.status='cancelled';terminate(child);this.changed();}

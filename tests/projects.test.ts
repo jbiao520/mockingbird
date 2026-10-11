@@ -98,6 +98,44 @@ test('Background AI completion stays in its owning project and closing one proje
   }finally{await manager.close();await f.remove();}
 });
 
+test('AI completion queues behind an in-flight dependency save and persists both changes',async()=>{
+  const f=await fixture(),manager=new ProjectManager(f.options);await manager.init();
+  let release=()=>{};
+  try{
+    await fs.appendFile(path.join(f.roots[0],'src/main/resources/application.properties'),'\nservices.user-alternate.url=http://127.0.0.1:8081\n');
+    const bench=await manager.open(f.roots[0]),{wf,dep}=await prepare(bench,'Saved');
+    bench.agents=[await fakeAgent(f.temp)];
+    const task=await bench.serial(()=>bench.chat('grok','task-a',undefined,wf.id));
+    let entered!:()=>void;const started=new Promise<void>(resolve=>entered=resolve),gate=new Promise<void>(resolve=>release=resolve);
+    bench.runtime.publish=async()=>{entered();await gate;};
+    const saving=bench.serial(()=>bench.saveDependency(wf.id,{...paymentDependencies(bench.index!)[0],configKey:'services.user-alternate.url'},dep.id));
+    await started;await fs.writeFile(path.join(f.temp,'release-a'),'go');
+    await waitUntil(()=>task.status==='completed');
+    assert(!bench.workspace.messages.some(message=>message.content==='finished-a'));
+    release();await saving;await bench.agentManager.stopAll();
+    assert(bench.workspace.messages.some(message=>message.content==='finished-a'));
+    assert.equal(bench.workspace.workflows[0].dependencies[0].configKey,'services.user-alternate.url');
+    const saved=JSON.parse(await fs.readFile(path.join(f.roots[0],'.mockingbird/workspace.json'),'utf8'));
+    assert(saved.messages.some((message:{content:string})=>message.content==='finished-a'));
+    assert.equal(saved.workflows[0].dependencies[0].configKey,'services.user-alternate.url');
+  }finally{release();await manager.close();await f.remove();}
+});
+
+test('Agent preparation failure inside a serial mutation reports its message without deadlocking',async()=>{
+  const f=await fixture(),manager=new ProjectManager(f.options);await manager.init();
+  try{
+    const bench=await manager.open(f.roots[0]);bench.agents=[await fakeAgent(f.temp)];
+    await bench.analyzeEntry(bench.workspace.project!.entries[0].id);
+    // A snapshot file/directory collision fails before the child process is spawned.
+    bench.index!.sources.set('Collision.java','class Collision {}');
+    bench.index!.sources.set('Collision.java/Nested.java','class Nested {}');
+    await assert.rejects(()=>bench.serial(()=>bench.chat('grok','task-a')),/EEXIST|ENOTDIR/);
+    await bench.agentManager.stopAll();
+    const task=bench.agentManager.tasks[0];assert.equal(task.status,'failed');
+    assert(bench.workspace.messages.some(message=>message.taskId===task.id&&message.content.includes('Agent 任务失败')));
+  }finally{await manager.close();await f.remove();}
+});
+
 test('Project views remain unpublished, persist across restart, and shared settings have one application owner',async()=>{
   const f=await fixture(),manager=new ProjectManager(f.options);await manager.init();
   const [a,b]=await Promise.all(f.roots.map(root=>manager.open(root))),idA=a.workspace.project!.id,idB=b.workspace.project!.id;

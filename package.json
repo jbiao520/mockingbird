@@ -15,6 +15,7 @@
     "start": "node dist/server.mjs",
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "tsx scripts/e2e.ts",
+    "test:regression": "tsx scripts/verify-regression.ts",
     "test:runtime": "tsx scripts/verify-runtime.ts",
     "test:agent": "tsx scripts/verify-agents.ts --generate",
     "test:grok": "tsx scripts/verify-agents.ts --grok --generate",

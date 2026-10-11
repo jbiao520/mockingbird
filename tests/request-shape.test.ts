@@ -75,7 +75,7 @@ test('HTTP client rejects invalid or stale entry payloads before making an outbo
     assert.equal(received.length,0);
     const valid=await post('/requests/test',{...template,target:'project'});assert.equal(valid.status,200);assert.equal((await valid.json()).status,200);assert.equal(JSON.parse(received[0].body).user_id,1);
     assert.equal(received[0].path,'/shop/orders/1?count=2');
-    const health=bench.requestTemplate(bench.workspace.project!.entries.find(e=>e.name==='health')!.id);
+    const health=await bench.requestTemplate(bench.workspace.project!.entries.find(e=>e.name==='health')!.id);
     assert.equal((await post('/requests/test',{...health,target:'project'})).status,200);assert.equal(received[1].method,'GET');assert.equal(received[1].body,'');
     assert.equal(received[1].path,'/shop/health');
   }finally{await service.close();await new Promise<void>(resolve=>{target.close(()=>resolve());target.closeAllConnections();});await fs.rm(root,{recursive:true,force:true});}
@@ -97,4 +97,37 @@ test('Context paths share generation and validation semantics for YAML, root and
     assert.throws(()=>generateRequestTemplate(index,entry.id),/context-path.*未能解析/);
     assert.throws(()=>validateEntryRequest(index,entry.id,{method:'GET',path:'/health'}),/context-path.*未能解析/);
   }finally{await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('HTTP templates and validation follow profiles, environment, JVM and arguments, including changed configuration',async()=>{
+  const root=await fixture();
+  const resources=path.join(root,'src/main/resources');await fs.mkdir(resources,{recursive:true});
+  await fs.writeFile(path.join(resources,'application.properties'),'server.servlet.context-path=/base\n');
+  await fs.writeFile(path.join(resources,'application-dev.properties'),'server.servlet.context-path=/profile\n');
+  const service=await createServer({root:process.cwd(),dataDir:path.join(root,'data')},0);
+  const paths:string[]=[];
+  const target=createHttpServer((req,res)=>{paths.push(req.url!);res.end('ok');});
+  await new Promise<void>(resolve=>target.listen(0,'127.0.0.1',resolve));
+  try{
+    const bench=await service.projects.open(root),entry=bench.workspace.project!.entries.find(e=>e.name==='health')!;
+    bench.launcher.state.status='running';bench.launcher.state.port=(target.address() as {port:number}).port;
+    const base=`http://127.0.0.1:${service.port}/api/projects/${bench.workspace.project!.id}`;
+    const post=(route:string,data:unknown)=>fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    let previous:ReturnType<typeof generateRequestTemplate>|undefined;
+    for(const [config,prefix] of [
+      [{profiles:'dev'},'/profile'],
+      [{profiles:'dev',env:'SERVER_SERVLET_CONTEXT_PATH=/environment'},'/environment'],
+      [{profiles:'dev',env:'SERVER_SERVLET_CONTEXT_PATH=/environment',jvm:'-Dserver.servlet.context-path=/jvm'},'/jvm'],
+      [{profiles:'dev',env:'SERVER_SERVLET_CONTEXT_PATH=/environment',jvm:'-Dserver.servlet.context-path=/jvm',args:'--server.servlet.context-path=/arguments'},'/arguments'],
+      [{args:'--server.servlet.context-path=/'},''],
+    ] as const){
+      await bench.saveRunConfig(config);
+      const response=await post('/requests/template',{entryId:entry.id});assert.equal(response.status,200);
+      const template=await response.json();assert.equal(template.path,prefix+'/health');
+      if(previous){const rejected=await post('/requests/test',{...previous,target:'project'});assert.equal(rejected.status,400);assert.match((await rejected.json()).error,/偏离入口/);}
+      const sent=await post('/requests/test',{...template,target:'project'});assert.equal(sent.status,200);assert.equal((await sent.json()).status,200);
+      previous=template;
+    }
+    assert.deepEqual(paths,['/profile/health','/environment/health','/jvm/health','/arguments/health','/health']);
+  }finally{await service.close();await new Promise<void>(resolve=>{target.close(()=>resolve());target.closeAllConnections();});await fs.rm(root,{recursive:true,force:true});}
 });

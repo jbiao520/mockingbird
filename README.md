@@ -62,6 +62,7 @@ AI 在用户明确要求动态行为时可返回同一套可编辑配置，仍�
 - 源码感知的 Mock 生成：显式选择 Flow、依赖、场景、CLI 与模型；候选绑定源码 revision 和依赖定义。审核、保存和批准都会拒绝过期候选。生成使用单独的结构化结果，不改变依赖发现的旧 schema。
 - Mock method / path / status / headers / delay / query / request headers / JSON body 匹配；已知 record / 普通类字段、嵌套对象、列表、枚举和 Jackson 别名会在候选完成前校验。Map、JsonNode 和未能解析的类型标成未验证，不假装完成了 Java 类型推断。
 - 真实 WireMock 启停、规则热更新、未匹配请求和日志、内置本地 HTTP Client。
+- 日常调试的 WireMock 最多保留最近 1000 条请求，Requests 面板查询最近 200 条，旧记录会被淘汰；回归独立保留 5001 条作为超出 5000 条验证上限的检测依据。
 - Mock 编辑器支持导出 WireMock 批量 Mapping JSON 和 Postman Collection v2.1（含响应 Examples），可选包含未启用场景；桌面原生保存，浏览器下载。
 - Codex 通过 app-server model/list、OpenCode 通过 models --pure、Grok 通过 models 自动发现模型；AI 面板可选模型、刷新列表，按助手分别保留选择。
 - Spring URL 配置项按依赖 Real / Mock 切换，批量覆盖预览，Maven / Gradle 项目启停与启动输出。
@@ -98,7 +99,7 @@ Postman 文件通过 Import 导入，包含各场景的请求、响应 Examples�
 
 ## 入口 API 请求验证
 
-入口请求会按 Controller 所在模块读取基础配置中的 `server.servlet.context-path`，自动添加应用路径前缀；生成与发送校验使用同一完整路径。多模块项目的 URL 配置也按 Flow 入口所在的应用模块解析，即使 HTTP Client 位于共享模块，也不会借用其它应用模块的同名配置。`src/test` 下的配置不参与运行配置解析。同一模块内的基础配置文件对同一键给出不同值时会报冲突，需先核对配置。旧工作区中的错误地址不能直接重新确认或应用 Mock 路由，应重新索引并编辑确认依赖。
+入口请求会按当前运行模块、Spring profile、外部配置、环境变量、JVM 参数和启动参数解析最终的 `server.servlet.context-path`，自动添加应用路径前缀；生成、发送校验和场景回归使用同一配置解析。运行配置改变路径前缀后，需要重新生成入口请求并更新场景。多模块项目的 URL 配置按 Flow 入口所在的应用模块解析，即使 HTTP Client 位于共享模块，也不会借用其它应用模块的同名配置。`src/test` 下的配置不参与运行配置解析。同一模块内的基础配置文件对同一键给出不同值时会报冲突，需先核对配置。旧工作区中的错误地址不能直接重新确认或应用 Mock 路由，应重新索引并编辑确认依赖。
 
 路由页的 **验证入口 API** 根据当前源码生成请求方法、路径、Query、Headers 和 JSON Body，每次打开都重置上一份请求。`long / Long` 生成 JSON 整数，字符串、布尔值、集合、嵌套 DTO 和枚举按可解析类型生成；DTO 的 `@JsonProperty`、`@JsonNaming` 和 `@JsonIgnore` 参与字段映射。示例值用于结构验证，业务 ID 和金额仍需按实际场景填写。
 
@@ -110,7 +111,19 @@ Postman 文件通过 Import 导入，包含各场景的请求、响应 Examples�
 
 项目目录中的 `.mockingbird/workspace.json` 保存可读的规则、Flow、对话和对应的源码 revision；`.mockingbird/routes.properties` 保存生成的 Spring 覆盖配置。删除或移动工作区前可备份这两个文件。重开项目恢复配置，不自动启动进程。退出应用停止其管理的 Java / WireMock / Agent 子进程。
 
-Flow 保存**用户确认的 HTTP 依赖及用户指定 / AI 推断的调用关系**，不再通过常见 Client 的静态特征自动发现依赖。导入阶段的 Java 索引用于入口和源码定位。AI 可搜索全部已索引的 Java 源码快照，检查自定义封装、接口实现与配置；候选必须由用户确认，动态路径需先填写，HTTP 日志才是实际请求证据。重新打开 Flow 保留已确认依赖；源码更新后需重新索引、核对依赖并确认版本。当前自动覆盖以基础 `application.properties/yml` 中可识别的 URL 配置项为主；profile、环境变量、多模块复杂构建和 Gradle 实际启动需要针对目标项目进一步验证。硬编码或未解析 URL 不允许自动接管。
+### Flow 场景集与一键回归
+
+Flow 顶部的 **场景集** 可新建、编辑、复制和删除场景；也可以从 Routes 的 **验证入口 API** 打开 HTTP Client，再点击 **保存为 Flow 场景**，带入当前请求。每个场景保存入口方法、路径（包含 Query）、Headers、JSON Body、每个下游的一条已保存 Mock，以及预期 HTTP 状态和 JSON Pointer 字段断言。例如 `{"/status":"COMPLETED"}` 只检查指定字段，不要求整个响应完全一致。下游调用次数留空表示不检查，`0` 表示不应调用。
+
+**一键回归** 执行当前 Flow 的全部场景；场景集页可以勾选部分场景、取消运行、展开失败原因、查看入口响应和下游请求，或 **重跑失败项**。同一项目同时只能运行一批回归。源码、依赖定义或 Mock 内容变化后，场景会标记为待复核，并在执行时阻塞；核对后重新保存场景即可更新绑定。规则启用开关和日常 Real / Mock 路由切换不使场景过期。
+
+回归使用独立 WireMock 和 Java 进程、自动分配本机端口及临时 Spring 路由配置，不改写日常调试的路由文件、Mock 启用状态或请求日志。一个批次启动一次 Java，串行切换场景，每次重置 WireMock 调用序列和请求日志。所选 Flow 的全部已声明下游必须能通过 URL 配置键接管为 Mock，每个依赖必须选择一条规则；启动参数覆盖 Mock 地址时会在启动进程前阻止回归，匹配冲突和未命中的下游请求会报告失败。入口请求超时或发生传输异常时停止批次，避免未完成请求影响后续场景。完成、取消、启动失败或关闭项目都会清理回归进程与临时文件。
+
+这版适用于单入口的同步请求回归：入口返回后采集下游日志，暂不支持异步后台任务的等待断言。Java 项目仍沿用自身数据库和其它外部资源配置；使用测试数据，场景间的数据库状态清理由项目负责。未声明的外部调用仍按项目原有配置执行。场景定义保存在工作区，最近一次报告按 Flow 单独保存在 `.mockingbird/regression/`；重开项目可查看报告，界面最多显示响应前 64KB 与 200 条下游记录，断言使用完整的受限响应和最多 5000 条下游记录。
+
+执行 `npm run test:regression` 可用实际 Spring Boot 支付示例和 WireMock 验证成功支付、库存不足时不调用银行、响应差异、持久化、调试隔离、取消与启动失败清理。
+
+Flow 保存**用户确认的 HTTP 依赖及用户指定 / AI 推断的调用关系**，不再通过常见 Client 的静态特征自动发现依赖。导入阶段的 Java 索引用于入口和源码定位。AI 可搜索全部已索引的 Java 源码快照，检查自定义封装、接口实现与配置；候选必须由用户确认，动态路径需先填写，HTTP 日志才是实际请求证据。重新打开 Flow 保留已确认依赖；源码更新后需重新索引、核对依赖并确认版本。路由页的运行配置可以指定 Spring profile、环境变量、JVM 参数、应用模块和启动参数。预览会按 Spring Boot 的顺序展示每个 URL 的来源和最终生效值：模块内 `application` 与 `application-{profile}`、`config/`、项目根目录外部配置、`.mockingbird/routes.properties`、环境变量、JVM `-D`、启动参数。环境变量或 JVM 参数盖过 routes 文件时，启动命令会追加对应的 `--key=value`，使 Mock 仍然生效；启动参数里已经写明的键保持用户的值，并在预览中标出。Gradle 不能从命令行传入 `-Xmx` 这类 JVM 标志。硬编码或未解析 URL 不允许自动接管。`spring.profiles.include`、配置中心和自定义 `spring.config.location` 不在计算范围内。
 
 响应校验能识别当前索引里的 record、普通类私有字段、一层泛型集合、枚举常量，以及 `@JsonProperty` / `@JsonNaming` / `@JsonIgnore`。它不是 Java 编译器：继承、构造器注入、复杂泛型和运行时多态不会完整解析。Map、JsonNode、Object 和找不到声明的类型会写进「未验证结构」，校验不会把它们当成已经证明的契约。已有 `mockingbird-contracts.json` 只是成功样本证据；业务拒绝等场景可以偏离它，但 2xx 响应仍要满足能解析到的 DTO 形状。校验失败的候选不会进入可审核 proposal。
 

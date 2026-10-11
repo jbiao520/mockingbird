@@ -13,12 +13,15 @@ import { detectAgents, AgentManager } from './agents';
 import { generateRules, validateRules, validateResponseContracts, assertSourceEvidence } from './rules';
 import type { GenerationLaunch } from './agents';
 import { routePreview, writeRoutes, ProjectLauncher } from './routes';
+import { emptyRunConfig, normalizeRunConfig } from './runtime-config';
 import { compute } from './analysis';
 import { generateRequestTemplate, validateEntryRequest } from './request-shape';
+import { resolveEntryContextPath } from './entry-runtime';
 import { confirmDependency, pruneWorkflow } from './dependencies';
 import { BehaviorPreviewer } from './behavior-preview';
 import { ruleFingerprint } from '../shared/rule-edit';
 import { behaviorCaseSchema } from './behavior-schema';
+import { makeScenario, RegressionRunner, readRegressionReport } from './regression';
 const exec=promisify(execFile);
 function dependencyFingerprint(wf:Workflow,ids:string[]){return ids.map(id=>{const dep=wf.dependencies.find(item=>item.id===id);return dep?`${dep.id}\t${dep.method}\t${dep.path}\t${dep.responseType||''}\t${dep.status}\t${dep.configKey||''}\t${dep.originalBase||''}`:`missing:${id}`;}).join('\n');}
 export interface Options { root:string; dataDir:string; runtimeDir?:string; samplePath?:string; desktop?:boolean; managed?:boolean;agents?:State['agents'];chooseDirectory?:(clientId?:string)=>Promise<string|null>;saveExport?:(artifact:{filename:string;content:string},clientId?:string)=>Promise<string|null>;focusWindow?:(clientId:string)=>Promise<boolean>;openProjectWindow?:(projectId:string,clientId:string)=>Promise<void> }
@@ -27,6 +30,7 @@ export class Workbench extends EventEmitter{
   runtime:MockRuntime;previewer:BehaviorPreviewer;launcher:ProjectLauncher;agents:State['agents']=[];agentManager:AgentManager;
   recent:State['recent']=[];problems:string[]=[];terminal:string[]=[];
   indexing?:string;
+  regression:RegressionRunner;
   private watcher?:FSWatcher;
   private sourceChanged=false;
   private mutationTail:Promise<unknown>=Promise.resolve();
@@ -36,16 +40,17 @@ export class Workbench extends EventEmitter{
   constructor(public options:Options){
     super();this.runtime=new MockRuntime(path.join(options.runtimeDir||path.join(options.root,'runtime'),'wiremock-standalone-3.13.2.jar'),path.join(options.dataDir,'wiremock'),()=>this.changed());
     this.previewer=new BehaviorPreviewer(this.runtime.jar);
+    this.regression=new RegressionRunner(this.runtime.jar,()=>this.changed());
     this.launcher=new ProjectLauncher(()=>this.changed());
-    this.agentManager=new AgentManager(()=>this.changed(),async task=>{
+    this.agentManager=new AgentManager(()=>this.changed(),task=>this.enqueueMutation(async()=>{
       this.addMessage('assistant',task.status==='completed'?task.summary||'任务完成':task.status==='cancelled'?'任务已取消':`Agent 任务失败：${task.error}`,task.id,task.proposal?.length?'mocks':this.activeWorkflowSafe()?'workflow':undefined);
       await saveWorkspace(this.workspace);this.changed();
-    });
+    }));
   }
   async init(){await fs.mkdir(this.options.dataDir,{recursive:true});await this.runtime.init();this.agents=this.options.agents||await detectAgents();if(!this.options.managed)try{this.recent=JSON.parse(await fs.readFile(path.join(this.options.dataDir,'recent.json'),'utf8'));}catch{/* initial state */}}
   changed(){this.emit('change');}
   get signal(){return this.lifetime.signal;}
-  state():State{return{workspace:this.workspace,runtime:this.runtime.state,launch:this.launcher.state,tasks:this.agentManager.tasks,agents:this.agents,recent:this.recent,problems:[...(this.sourceChanged?['源码或配置发生变化，请重新索引并分析 Flow']:[]),...this.problems,...(this.workspace.project?.warnings||[]),...(this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId)?.warnings||[])],terminal:this.terminal,samplePath:this.options.samplePath||path.join(this.options.root,'examples/payment-service'),desktop:Boolean(this.options.desktop),indexing:this.indexing};}
+  state():State{return{workspace:this.workspace,runtime:this.runtime.state,launch:this.launcher.state,tasks:this.agentManager.tasks,agents:this.agents,recent:this.recent,problems:[...(this.sourceChanged?['源码或配置发生变化，请重新索引并分析 Flow']:[]),...this.problems,...(this.workspace.project?.warnings||[]),...(this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId)?.warnings||[])],terminal:this.terminal,samplePath:this.options.samplePath||path.join(this.options.root,'examples/payment-service'),desktop:Boolean(this.options.desktop),indexing:this.indexing,regression:this.regression.state};}
   private watchProject(){
     this.watcher?.close();this.sourceChanged=false;
     try{
@@ -61,12 +66,14 @@ export class Workbench extends EventEmitter{
   }
   private requireFreshIndex(){if(this.sourceChanged)throw new Error('源码或配置发生变化，请先重新索引，再分析 Flow');return this.requireIndex();}
   assertRevision(revision:string){if(this.requireFreshIndex().project.revision!==revision)throw new Error('草稿对应的源码版本已过期，请重新索引并审核或重新生成规则');}
-  serial<T>(fn:()=>Promise<T>):Promise<T>{const guarded=()=>{if(this.lifetime.signal.aborted)throw new Error('项目正在关闭');return fn();};const run=this.mutationTail.then(guarded,guarded);this.mutationTail=run.catch(()=>{});return run;}
+  private enqueueMutation<T>(fn:()=>Promise<T>):Promise<T>{const run=this.mutationTail.then(fn,fn);this.mutationTail=run.catch(()=>{});return run;}
+  serial<T>(fn:()=>Promise<T>):Promise<T>{return this.enqueueMutation(()=>{if(this.lifetime.signal.aborted)throw new Error('项目正在关闭');return fn();});}
   track<T>(fn:()=>Promise<T>):Promise<T>{if(this.lifetime.signal.aborted)return Promise.reject(new Error('项目正在关闭'));const run=Promise.resolve().then(fn);this.requests.add(run);void run.finally(()=>this.requests.delete(run)).catch(()=>{});return run;}
   requireIndex(){if(!this.index)throw new Error('请先导入 Java 项目');return this.index;}
   activeWorkflow(){const wf=this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId);if(!wf)throw new Error('请先分析 API Flow');return wf;}
   addMessage(role:Message['role'],content:string,taskId?:string,action?:Message['action']){this.workspace.messages.push({id:randomUUID(),role,content:redact(content),at:new Date().toISOString(),taskId,action});this.workspace.messages=this.workspace.messages.slice(-100);}
   async importProject(projectPath:string){
+    await this.regression.close();this.regression.state=undefined;
     if(this.agentManager.tasks.some(t=>t.status==='running'))throw new Error('请先取消运行中的 Agent 任务');
     let index:Index;this.indexing='扫描 Java 项目';this.changed();
     try{index=await compute<Index>(this.options.root,'index',{path:projectPath},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}
@@ -206,9 +213,19 @@ export class Workbench extends EventEmitter{
     for(const task of this.agentManager.tasks)if(task.proposal?.length&&task.proposal.every(r=>next.some(n=>n.id===r.id&&(!task.ruleEdit||task.id===reviewTaskId||ruleFingerprint({...n,version:0})===ruleFingerprint({...r,version:0})))))task.approved=true;
     this.problems=[];this.changed();return next;
   }
-  async setRoutes(input:Record<string,'real'|'mock'>,launchPort=18080){
+  async saveRunConfig(input:unknown){
+    const runConfig=normalizeRunConfig(input);
+    if(runConfig.module&&runConfig.module!=='.'&&!this.workspace.project?.modules.includes(runConfig.module))throw new Error('运行模块不存在：'+runConfig.module);
+    const previous=JSON.stringify(this.workspace.runConfig??emptyRunConfig());
+    this.workspace={...this.workspace,runConfig};
+    await saveWorkspace(this.workspace);
+    if(previous!==JSON.stringify(runConfig)&&this.launcher.child)this.launcher.state.stale=true;
+    this.changed();return runConfig;
+  }
+  async setRoutes(input:Record<string,'real'|'mock'>,launchPort=18080,runConfigInput?:unknown){
     const changes=z.record(z.string(),z.enum(['real','mock'])).parse(input);
     const ws=structuredClone(this.workspace);
+    if(runConfigInput!==undefined)ws.runConfig=normalizeRunConfig(runConfigInput);
     const deps=ws.workflows.flatMap(w=>w.dependencies);
     for(const[id,route]of Object.entries(changes)){
       const dep=deps.find(d=>d.id===id);if(!dep)throw new Error('依赖不存在');
@@ -266,7 +283,34 @@ export class Workbench extends EventEmitter{
     }else{const replace=new Set(task.proposal.map(r=>r.id)),deps=new Set(task.proposal.map(r=>r.dependencyId));await this.setRules([...this.workspace.rules.filter(r=>!replace.has(r.id)&&!deps.has(r.dependencyId)),...task.proposal]);}
     task.approved=true;this.changed();
   }
-  requestTemplate(entryId:string){return generateRequestTemplate(this.requireFreshIndex(),entryId);}
+  private entryContextPath(index:Index,entryId:string){
+    const entry=index.project.entries.find(entry=>entry.id===entryId);if(!entry)throw new Error('入口 API 不存在，请重新索引');
+    return resolveEntryContextPath(this.workspace,entry);
+  }
+  async requestTemplate(entryId:string){const index=this.requireFreshIndex();return generateRequestTemplate(index,entryId,await this.entryContextPath(index,entryId));}
+  async saveFlowScenario(input:unknown){
+    const index=this.requireFreshIndex(),{workflowId}=z.object({workflowId:z.string()}).parse(input);
+    const workflow=this.workspace.workflows.find(workflow=>workflow.id===workflowId);if(!workflow)throw new Error('Flow 不存在');
+    const scenario=makeScenario(input,this.workspace,index,await this.entryContextPath(index,workflow.entry.id));
+    const previous=this.workspace.flowScenarios||[];
+    if((input as {id?:string})?.id&&!previous.some(s=>s.id===scenario.id&&s.workflowId===scenario.workflowId))throw new Error('要修改的场景不存在或不属于当前 Flow');
+    if(!previous.some(s=>s.id===scenario.id)&&previous.filter(s=>s.workflowId===scenario.workflowId).length>=100)throw new Error('每个 Flow 最多保存 100 个场景');
+    const ws={...this.workspace,flowScenarios:[...previous.filter(s=>s.id!==scenario.id),scenario]};
+    await saveWorkspace(ws);this.workspace=ws;this.changed();return scenario;
+  }
+  async removeFlowScenario(id:string){
+    if(!this.workspace.flowScenarios?.some(s=>s.id===id))throw new Error('场景不存在');
+    const ws={...this.workspace,flowScenarios:this.workspace.flowScenarios.filter(s=>s.id!==id)};
+    await saveWorkspace(ws);this.workspace=ws;this.changed();
+  }
+  runRegression(input:unknown){
+    const data=z.object({workflowId:z.string(),scenarioIds:z.array(z.string()).min(1).max(100)}).parse(input),index=this.requireFreshIndex();
+    return this.regression.start(this.workspace,index,data.workflowId,data.scenarioIds,this.signal,()=>this.assertRevision(index.project.revision));
+  }
+  regressionReport(workflowId:string){
+    if(!this.workspace.workflows.some(w=>w.id===workflowId))throw new Error('Flow 不存在');
+    return readRegressionReport(this.requireIndex().project.path,workflowId);
+  }
   async previewBehavior(input:unknown){
     const data=z.object({rules:z.unknown(),ruleId:z.string(),cases:z.array(behaviorCaseSchema).min(1).max(30).optional()}).parse(input);
     return{reports:await this.previewer.run(data.rules as MockRule[],data.ruleId,data.cases,this.requireIndex(),this.workspace.workflows.flatMap(w=>w.dependencies))};
@@ -275,7 +319,7 @@ export class Workbench extends EventEmitter{
     const data=z.object({target:z.enum(['mock','project']),method:z.enum(['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']),path:z.string().startsWith('/').max(2000),body:z.json().optional(),headers:z.record(z.string(),z.string()).optional(),entryId:z.string().optional(),revision:z.string().optional()}).parse(input);
     if(data.path.startsWith('//')||data.path.startsWith('/__admin')||data.path.includes('://'))throw new Error('请求路径非法');
     let warnings:string[]=[];
-    if(data.target==='project'&&data.entryId){const index=this.requireFreshIndex();if(data.revision!==index.project.revision)throw new Error('请求样例已过期，请重新点击“验证入口 API”');warnings=validateEntryRequest(index,data.entryId,data).warnings;}
+    if(data.target==='project'&&data.entryId){const index=this.requireFreshIndex();if(data.revision!==index.project.revision)throw new Error('请求样例已过期，请重新点击“验证入口 API”');warnings=validateEntryRequest(index,data.entryId,data,await this.entryContextPath(index,data.entryId)).warnings;}
     const runtime=data.target==='mock'?this.runtime.state:this.launcher.state;if(runtime.status!=='running')throw new Error('目标服务尚未运行');
     const url=`http://127.0.0.1:${runtime.port}${data.path}`;const started=Date.now();
     const response=await fetch(url,{method:data.method,headers:{'Content-Type':'application/json',...data.headers},body:['GET','HEAD'].includes(data.method)||data.body===undefined?undefined:JSON.stringify(data.body),redirect:'error',signal:AbortSignal.any([AbortSignal.timeout(35000),this.lifetime.signal])});
@@ -288,5 +332,5 @@ export class Workbench extends EventEmitter{
     this.terminal.push('$ '+command);try{const result=await exec(spec[0],spec[1],{cwd:this.index?.project.path||this.options.root,timeout:10000,maxBuffer:1024*1024,signal:this.lifetime.signal});this.terminal.push(redact(result.stdout+result.stderr));}catch(e){this.terminal.push(redact((e as Error).message));}this.terminal=this.terminal.slice(-100);this.changed();
   }
   source(relative:string){return readSource(this.requireIndex(),relative);}
-  close(){if(!this.closePromise)this.closePromise=(async()=>{this.lifetime.abort();this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.previewer.close()]);await Promise.allSettled([this.mutationTail,...this.requests]);await this.agentManager.stopAll();await Promise.all([this.previewer.close(),this.runtime.stop(),this.launcher.stop()]);await saveWorkspace(this.workspace);})();return this.closePromise;}
+  close(){if(!this.closePromise)this.closePromise=(async()=>{this.lifetime.abort();this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.previewer.close(),this.regression.close()]);await Promise.allSettled([this.mutationTail,...this.requests]);await this.agentManager.stopAll();await Promise.all([this.previewer.close(),this.runtime.stop(),this.launcher.stop()]);await saveWorkspace(this.workspace);})();return this.closePromise;}
 }
