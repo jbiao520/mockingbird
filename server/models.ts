@@ -15,7 +15,8 @@ export function parseOpenCodeModels(output:string):AgentModel[]{
     const block=clean.slice(rows[i].index!+rows[i][0].length,rows[i+1]?.index).trim();
     let metadata:any;try{metadata=JSON.parse(block);}catch{/* older CLI plain output */}
     const variants=metadata?.variants;
-    models.push({id,name:metadata?.name||id,...(variants&&typeof variants==='object'?{efforts:Object.keys(variants).filter(key=>variants[key]?.disabled!==true)}:{})});
+    const efforts=variants&&typeof variants==='object'?Object.keys(variants).filter(key=>variants[key]?.disabled!==true):[];
+    models.push({id,name:metadata?.name||id,...(efforts.length?{efforts}:{})});
   }
   return models;
 }
@@ -26,13 +27,16 @@ export function parseGrokModels(output:string):AgentModel[]{
     const match=/^\s*[-*]\s+([\w][\w./:-]*)\s*(?:\(default\))?\s*$/.exec(line);
     if(match&&!models.some(m=>m.id===match[1])){
       const id=match[1],version=/^grok-4\.(5|6|7)(?:$|-)/.exec(id);
-      models.push({id,name:id,isDefault:/\(default\)/.test(line)||id==='grok-4.7',...(version?{efforts:['low','medium','high',...(version[1]!=='5'?['xhigh']:[])],defaultEffort:'medium'}:{})});
+      models.push({id,name:id,isDefault:/\(default\)/.test(line),...(version?{efforts:['low','medium','high',...(version[1]!=='5'?['xhigh']:[])],defaultEffort:'medium'}:{})});
     }
   }
   return models;
 }
 export async function discoverModels(agent:AgentInfo):Promise<AgentModel[]>{
-  return (await discoverModelCatalog(agent)).map(model=>isFastModel(model)?{...model,disabled:true}:model);
+  const models=(await discoverModelCatalog(agent)).map(model=>isFastModel(model)?{...model,disabled:true}:model);
+  if(models.some(model=>model.isDefault&&!isFastModel(model)&&!model.disabled))return models;
+  const index=models.findIndex(model=>!model.disabled&&!isFastModel(model));
+  return index<0?models:models.map((model,i)=>i===index?{...model,isDefault:true}:model);
 }
 async function discoverModelCatalog(agent:AgentInfo):Promise<AgentModel[]>{
   if(!agent.installed||!agent.path)throw new Error('请先安装并登录所选 CLI');

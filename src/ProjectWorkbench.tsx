@@ -64,6 +64,7 @@ export default function ProjectWorkbench({application,onOpen,onModels,projectMen
   const effortChoices=selectedModel?.efforts||[];
   const effort=effortChoices.includes(selectedEfforts[effortKey])?selectedEfforts[effortKey]:'';
   const setEffort=(value:string)=>setSelectedEfforts(previous=>({...previous,[effortKey]:value}));
+  const shownModel=modelsLoading[agent]?'':(model||selectedModel?.id||'');
   const agentOptionsBlocked=agent!=='local'&&(!!modelsLoading[agent]||!selectedModel||modelDisabled(selectedModel));
 
   const setSelectedModels=(next:Record<string,string>|((previous:Record<string,string>)=>Record<string,string>))=>{
@@ -71,6 +72,14 @@ export default function ProjectWorkbench({application,onOpen,onModels,projectMen
     onModels(models);
   };
   const setModel=(value:string)=>setSelectedModels(previous=>({...previous,[agent]:value}));
+  useEffect(()=>{
+    if(agent==='local'||modelsLoading[agent])return;
+    const choices=modelChoices[agent];
+    if(!choices?.length)return;
+    const explicit=savedModel&&choices.some(item=>item.id===savedModel&&!modelDisabled(item))?savedModel:'';
+    const next=effectiveModel(choices,explicit);
+    if(next&&savedModel!==next.id)setModel(next.id);
+  },[agent,modelChoices,modelsLoading,savedModel]);
   const loadModels=useCallback(async(id:string,refresh=false)=>{
     setModelsLoading(old=>({...old,[id]:true}));setModelErrors(old=>({...old,[id]:''}));
     try{const result=await globalApi<{models:AgentModel[]}>('/agents/'+encodeURIComponent(id)+'/models'+(refresh?'?refresh=true':'' ));setModelChoices(old=>({...old,[id]:result.models}));}
@@ -123,7 +132,7 @@ export default function ProjectWorkbench({application,onOpen,onModels,projectMen
     if(result.content&&result.filename){const url=URL.createObjectURL(new Blob([result.content],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=result.filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
     setExportModal(false);setToast({text:result.savedPath?'已导出至 '+result.savedPath:'Mock 文件已导出'});
   });
-  const modelSelect=<select aria-label="AI Model" title={model||'CLI 默认模型'} value={model} disabled={modelsLoading[agent]} onChange={e=>setModel(e.target.value)}><option value="">{modelsLoading[agent]?'正在识别模型…':selectedModel&&!model?'默认 · '+selectedModel.name:'CLI 默认模型'}</option>{model&&!modelChoices[agent]?.some(m=>m.id===model)&&<option value={model} disabled={isFastModel({id:model,name:model})}>{model}（已保存）</option>}{(modelChoices[agent]||[]).map(m=><option key={m.id} value={m.id} disabled={modelDisabled(m)}>{m.name}{modelDisabled(m)?' · 已禁用':''}{m.isDefault?' · 默认':''}</option>)}</select>;
+  const modelSelect=<select aria-label="AI Model" title={selectedModel?.name||(modelsLoading[agent]?'正在识别模型…':'没有可用模型')} value={shownModel} disabled={!!modelsLoading[agent]} onChange={e=>setModel(e.target.value)}>{modelsLoading[agent]&&<option value="">正在识别模型…</option>}{!modelsLoading[agent]&&!selectedModel&&<option value="">没有可用模型</option>}{model&&!modelChoices[agent]?.some(m=>m.id===model)&&<option value={model} disabled={isFastModel({id:model,name:model})}>{model}（已保存）</option>}{(modelChoices[agent]||[]).map(m=><option key={m.id} value={m.id} disabled={modelDisabled(m)}>{m.name}{modelDisabled(m)?' · 已禁用':''}{m.isDefault?' · 默认':''}</option>)}</select>;
   const effortSelect=agent!=='local'&&effortChoices.length>0?<select className="effort-select" aria-label="AI Effort" title="推理强度 Effort" value={effort} disabled={modelsLoading[agent]} onChange={e=>setEffort(e.target.value)}><option value="">{selectedModel?.defaultEffort||'默认'}</option>{effortChoices.map(value=><option key={value} value={value}>{value}</option>)}</select>:null;
   const modelSelector=agent!=='local'?<div className="model-selector"><label className="field">模型{modelSelect}</label>{effortSelect&&<label className="field">Effort{effortSelect}</label>}<button title="刷新模型列表" aria-label="刷新模型列表" disabled={modelsLoading[agent]} onClick={()=>void loadModels(agent,true)}><RefreshCw size={13}/></button>{modelErrors[agent]&&<small className="error-text">{modelErrors[agent]}</small>}</div>:null;
   const openSource=(file:string,line=1)=>{void run('读取源码',async()=>{if(!source[file]){const r=await api<{source:string}>('/source?path='+encodeURIComponent(file));setSource(old=>({...old,[file]:r.source}));}openTab({id:'source:'+file,title:file.split('/').at(-1)!,kind:'source',file,line});});};
@@ -142,15 +151,15 @@ export default function ProjectWorkbench({application,onOpen,onModels,projectMen
   };
   const activateWorkflowView=(wf:Workflow,forceFlow=false)=>{setSelectedDeps([]);setDetail(null);if(current.kind==='routes'&&!forceFlow)return;openTab({id:'flow:'+wf.id,title:wf.entry.path.split('/').at(-1)+' · Flow',kind:'flow',workflowId:wf.id});};
   const analyzeEntry=(entry:Entry,forceFlow=false)=>void run('选择 API',async()=>{const wf=await api<Workflow>('/workflows/analyze',{entryId:entry.id});activateWorkflowView(wf,forceFlow);});
-  const openGenerate=(workflowId?:string,dependencyIds?:string[])=>{const tabFlow=current.kind==='flow'?current.workflowId:undefined;const id=workflowId||tabFlow||ws?.activeWorkflowId;const target=ws?.workflows.find(item=>item.id===id);if(!target){setToast({text:'请先打开一个 Flow，再生成 Mock',error:true});return;}const scope=dependencyIds??(current.kind==='flow'&&current.workflowId===target.id?selectedDeps:[]);const available=state?.agents.filter(item=>item.installed)||[];if(!available.some(item=>item.id===agent)){const preferred=available.find(item=>item.id==='grok')||available[0];if(preferred)setAgent(preferred.id);}setGenerationTaskId(undefined);consumedGeneration.current='';setGenerateDialog({workflowId:target.id,dependencyIds:scope.length?scope:target.dependencies.filter(dep=>dep.status!=='unresolved').map(dep=>dep.id)});};
+  const activateInstalledAgent=()=>{const available=state?.agents.filter(item=>item.installed)||[];const next=available.some(item=>item.id===agent)?agent:available[0]?.id;if(next&&next!==agent)setAgent(next);if(next&&next!=='local'&&!modelChoices[next])void loadModels(next);return next;};
+  const openGenerate=(workflowId?:string,dependencyIds?:string[])=>{const tabFlow=current.kind==='flow'?current.workflowId:undefined;const id=workflowId||tabFlow||ws?.activeWorkflowId;const target=ws?.workflows.find(item=>item.id===id);if(!target){setToast({text:'请先打开一个 Flow，再生成 Mock',error:true});return;}const scope=dependencyIds??(current.kind==='flow'&&current.workflowId===target.id?selectedDeps:[]);activateInstalledAgent();setGenerationTaskId(undefined);consumedGeneration.current='';setGenerateDialog({workflowId:target.id,dependencyIds:scope.length?scope:target.dependencies.filter(dep=>dep.status!=='unresolved').map(dep=>dep.id)});};
   const startLocalGenerate=(workflowId:string,ids:string[],scenario:string)=>void run('生成本地模板',async()=>{const result=await api<{rules:MockRule[]}>('/rules/generate',{workflowId,ids,scenario});setGenerateDialog(null);reviewCandidates(result.rules);});
   const startAiGenerate=(workflowId:string,input:{dependencyIds:string[];scenario:'success'|'rejection'|'custom';customScenario?:string;instructions:string;agent:string;model?:string;effort?:string})=>void run('提交源码生成',async()=>{const task=await api<Task>('/rules/generate/ai',{workflowId,...input});setGenerationTaskId(task.id);setBottom(true);setTool('Tasks');});
   const openEntryDiscovery=()=>{
     const current=state?.tasks.find(task=>task.id===entryTaskId);
     const reusable=current&&current.kind==='entry-discovery'&&current.status!=='failed'&&!current.approved&&current.revision===project?.revision?current:undefined;
     const pending=reusable||state?.tasks.find(task=>task.kind==='entry-discovery'&&task.status==='completed'&&!task.approved&&task.entryProposal&&task.revision===project?.revision);
-    const available=state?.agents.filter(item=>item.installed)||[];
-    if(!available.some(item=>item.id===agent)){const preferred=available.find(item=>item.id==='grok')||available[0];if(preferred)setAgent(preferred.id);}
+    activateInstalledAgent();
     setEntryTaskId(pending?.id);setEntryDialog(true);
   };
   const startEntryDiscovery=(input:{prompt:string;agent:string;model?:string;effort?:string})=>void run('发现入口',async()=>{const task=await api<Task>('/entries/discover',input);consumedEntry.current='';setEntryTaskId(task.id);setBottom(true);setTool('Tasks');});
@@ -208,8 +217,8 @@ export default function ProjectWorkbench({application,onOpen,onModels,projectMen
     setScenarioSeed({workflowId:target.id,seed:{request:{method:testMethod as RequestTemplate['method'],path:testPath,headers:JSON.parse(testHeaders),body},status:testResult?.status}});openScenarios(target);
   });
   const sendPrompt=()=>{const content=prompt.trim();if(!content||agentOptionsBlocked||busy||state?.tasks.some(t=>t.status==='running')||(ruleEditTarget&&(agent==='local'||!editorValid)))return;void run('提交 Agent 任务',async()=>{
-    if(ruleEditTarget){const rule=(draftRules||ws?.rules||[]).find(r=>r.id===ruleEditTarget);if(!rule)throw new Error('所选规则已删除，请重新选择');if(!editorValid)throw new Error('请先修正草稿中的格式错误');await api('/agents/rule-edit',{agent,prompt:content,rule,model:model||undefined,effort:effort||undefined});}
-    else await api('/agents/run',{agent,prompt:content,model:model||undefined,effort:effort||undefined,workflowId:currentWorkflow?.id});
+    if(ruleEditTarget){const rule=(draftRules||ws?.rules||[]).find(r=>r.id===ruleEditTarget);if(!rule)throw new Error('所选规则已删除，请重新选择');if(!editorValid)throw new Error('请先修正草稿中的格式错误');await api('/agents/rule-edit',{agent,prompt:content,rule,model:selectedModel?.id,effort:effort||undefined});}
+    else await api('/agents/run',{agent,prompt:content,model:selectedModel?.id,effort:effort||undefined,workflowId:currentWorkflow?.id});
     setPrompt('');
   });};
   const onPromptKeyDown=(event:ReactKeyboardEvent<HTMLTextAreaElement>)=>{

@@ -16,6 +16,43 @@ public class LegacyOrderController {
 }
 `;
 
+test('Entry discovery selects an available OpenCode model when it is the only CLI',async({page})=>{
+  const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-opencode-model-'));
+  const root=path.join(temp,'payment');
+  await fs.cp('examples/payment-service',root,{recursive:true,filter:source=>!source.includes(`${path.sep}target`)&&!source.includes(`${path.sep}.mockingbird`)});
+  const executable=path.join(temp,'fake-opencode.cjs');
+  await fs.writeFile(executable,`#!/usr/bin/env node
+if(process.argv.includes('models')){
+  console.log('opencode/usable-model');
+  console.log(JSON.stringify({name:'Usable Model',variants:{medium:{}}}));
+  console.log('opencode/fast-model');
+  console.log(JSON.stringify({name:'Fast Model'}));
+  process.exit(0);
+}
+process.exit(0);
+`,{mode:0o755});
+  const service=await createServer({root:process.cwd(),dataDir:path.join(temp,'data')},0);
+  service.projects.agents=[{id:'codex',installed:false},{id:'opencode',installed:true,path:executable},{id:'grok',installed:false}];
+  const errors:string[]=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  try{
+    await page.goto(`http://127.0.0.1:${service.port}`);
+    await page.getByRole('button',{name:'打开新项目',exact:true}).click();
+    await visible(page).getByPlaceholder('/path/to/your/java-project').fill(root);
+    await visible(page).getByRole('button',{name:'打开并索引',exact:true}).click();
+    await expect(visible(page).locator('.project-root')).toContainText('payment');
+    await visible(page).getByRole('button',{name:'AI 发现入口',exact:true}).first().click();
+    const dialog=page.getByRole('dialog',{name:'AI 发现入口'});
+    await expect(dialog.getByLabel('发现入口 Agent')).toHaveValue('opencode');
+    const models=dialog.getByLabel('发现入口模型',{exact:true});
+    await expect(models).toHaveValue('opencode/usable-model');
+    await expect(models.locator('option:checked')).toHaveText('Usable Model · 默认');
+    await expect(models.locator('option[value="opencode/fast-model"]')).toHaveText('Fast Model · 已禁用');
+    await expect(dialog.getByRole('button',{name:'开始扫描'})).toBeEnabled();
+    expect(errors).toEqual([]);
+  }finally{await service.close();await fs.rm(temp,{recursive:true,force:true});}
+});
+
 test('Confirmed AI entry discovery adds a project entry and opens a Flow',async({page})=>{
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-entry-ui-'));
   const root=path.join(temp,'legacy-service');

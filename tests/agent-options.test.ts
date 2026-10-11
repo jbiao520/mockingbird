@@ -12,6 +12,7 @@ import type { Workspace } from '../shared/types';
 test('Fast models cannot be selected or used as defaults, and effort is model-specific',()=>{
   const models=[{id:'provider/quick',name:'FAST model',isDefault:true},{id:'normal',name:'Normal',efforts:['medium','high'],defaultEffort:'medium'}];
   assert.deepEqual(resolveAgentOptions(models),{model:'normal',effort:'medium'});
+  assert.deepEqual(resolveAgentOptions(models,'missing-model'),{model:'normal',effort:'medium'});
   assert.throws(()=>resolveAgentOptions(models,'provider/quick'),/Fast/);
   assert.throws(()=>resolveAgentOptions(models,'grok-4.7-build-fast'),/Fast/);
   assert.throws(()=>resolveAgentOptions(models,'normal','ultra'),/不支持/);

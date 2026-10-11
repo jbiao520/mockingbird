@@ -108,6 +108,12 @@ test('Grok model discovery parses its CLI catalog and default selection',async()
   try{
     await fs.writeFile(cli,`#!${process.execPath}\nif(process.argv[2]!=='models')process.exit(1);console.log('  - grok-4.5');`,{mode:0o755});
     assert.equal((await discoverModels({id:'grok',installed:true,path:cli}))[0].id,'grok-4.5');
+    assert.equal((await discoverModels({id:'grok',installed:true,path:cli}))[0].isDefault,true);
+    await fs.writeFile(cli,`#!${process.execPath}\nif(!process.argv.includes('models'))process.exit(1);\nconsole.log('provider/fast-model\\n'+JSON.stringify({name:'Fast Model'}));\nconsole.log('provider/usable-model\\n'+JSON.stringify({name:'Usable Model',variants:{medium:{}}}));`,{mode:0o755});
+    const opencode=await discoverModels({id:'opencode',installed:true,path:cli});
+    assert.equal(opencode.find(model=>model.id==='provider/fast-model')?.disabled,true);
+    assert.equal(opencode.find(model=>model.id==='provider/usable-model')?.isDefault,true);
+    assert.deepEqual(opencode.find(model=>model.id==='provider/usable-model')?.efforts,['medium']);
     await fs.writeFile(cli,`#!${process.execPath}\nconsole.log('Not logged in');`,{mode:0o755});
     await assert.rejects(()=>discoverModels({id:'grok',installed:true,path:cli}),/grok login/);
   }finally{await fs.rm(temp,{recursive:true,force:true});}
