@@ -6,11 +6,20 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { MockRule } from '../shared/types';
+import type { AgentModel, MockRule } from '../shared/types';
 import { exportMocks } from '../server/exports';
 import { discoverModels, parseOpenCodeModels, parseGrokModels } from '../server/models';
 import { MockRuntime } from '../server/runtime';
 import { createServer } from '../server/api';
+
+async function discoverOpenCodeOnPath(directory:string,detectedPath?:string):Promise<AgentModel[]>{
+  const source=`import {discoverModels} from './server/models.ts';
+    console.log(JSON.stringify(await discoverModels({id:'opencode',installed:true,path:process.argv[1]||undefined})));`;
+  const {stdout}=await promisify(execFile)(process.execPath,['--import','tsx','--input-type=module','--eval',source,detectedPath||''],{
+    cwd:process.cwd(),env:{...process.env,PATH:directory+path.delimiter+(process.env.PATH||'')},timeout:15000
+  });
+  return JSON.parse(stdout);
+}
 
 const rule=():MockRule=>({id:randomUUID(),dependencyId:'user',name:'User',scenario:'Success',method:'POST',path:'/users/{id}',status:201,headers:{'Content-Type':'application/json'},body:{ok:true},delay:5,enabled:true,query:{q:'a & b'},requestHeaders:{'X-Scenario':'success'},requestBody:{amount:12},basis:'Sample',version:1});
 
@@ -82,7 +91,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 test('Model discovery launches env-node CLI wrappers with a minimal desktop PATH',async()=>{
   if(process.platform==='win32')return;
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-desktop-path-'));
-  const cli=path.join(temp,'mock-cli');
+  const cli=path.join(temp,'opencode');
   try{
     await fs.symlink(process.execPath,path.join(temp,'node'));
     await fs.writeFile(cli,`#!/usr/bin/env node
@@ -101,6 +110,23 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   }finally{await fs.rm(temp,{recursive:true,force:true});}
 });
 
+test('OpenCode model discovery uses the command on PATH even when the detected installation moved',async()=>{
+  if(process.platform==='win32')return;
+  const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-opencode-path-'));
+  try{
+    await fs.writeFile(path.join(temp,'opencode'),`#!${process.execPath}
+const assert=require('node:assert/strict');
+assert.deepEqual(process.argv.slice(2),['models','--pure','--verbose']);
+assert.equal(process.env.OPENCODE_DISABLE_PROJECT_CONFIG,'true');
+assert.equal(process.env.OPENCODE_DISABLE_AUTOUPDATE,'true');
+console.log('provider/path-model');`,{mode:0o755});
+    for(const detectedPath of [path.join(temp,'old-install','opencode'),undefined]){
+      assert.equal((await discoverOpenCodeOnPath(temp,detectedPath))[0].id,'provider/path-model');
+    }
+    await assert.rejects(()=>discoverModels({id:'opencode',installed:false}),/请先安装/);
+  }finally{await fs.rm(temp,{recursive:true,force:true});}
+});
+
 test('Grok model discovery parses its CLI catalog and default selection',async()=>{
   assert.deepEqual(parseGrokModels('You are logged in.\nDefault model: grok-4.7\nAvailable models:\n * grok-4.7 (default)\n - grok-4.5\n - grok-4.5\n'),[{id:'grok-4.7',name:'grok-4.7',isDefault:true,efforts:['low','medium','high','xhigh'],defaultEffort:'medium'},{id:'grok-4.5',name:'grok-4.5',isDefault:false,efforts:['low','medium','high'],defaultEffort:'medium'}]);
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-grok-models-'));
@@ -109,8 +135,9 @@ test('Grok model discovery parses its CLI catalog and default selection',async()
     await fs.writeFile(cli,`#!${process.execPath}\nif(process.argv[2]!=='models')process.exit(1);console.log('  - grok-4.5');`,{mode:0o755});
     assert.equal((await discoverModels({id:'grok',installed:true,path:cli}))[0].id,'grok-4.5');
     assert.equal((await discoverModels({id:'grok',installed:true,path:cli}))[0].isDefault,true);
-    await fs.writeFile(cli,`#!${process.execPath}\nif(!process.argv.includes('models'))process.exit(1);\nconsole.log('provider/fast-model\\n'+JSON.stringify({name:'Fast Model'}));\nconsole.log('provider/usable-model\\n'+JSON.stringify({name:'Usable Model',variants:{medium:{}}}));`,{mode:0o755});
-    const opencode=await discoverModels({id:'opencode',installed:true,path:cli});
+    const openCodeCli=path.join(temp,'opencode');
+    await fs.writeFile(openCodeCli,`#!${process.execPath}\nif(!process.argv.includes('models'))process.exit(1);\nconsole.log('provider/fast-model\\n'+JSON.stringify({name:'Fast Model'}));\nconsole.log('provider/usable-model\\n'+JSON.stringify({name:'Usable Model',variants:{medium:{}}}));`,{mode:0o755});
+    const opencode=await discoverOpenCodeOnPath(temp,openCodeCli);
     assert.equal(opencode.find(model=>model.id==='provider/fast-model')?.disabled,true);
     assert.equal(opencode.find(model=>model.id==='provider/usable-model')?.isDefault,true);
     assert.deepEqual(opencode.find(model=>model.id==='provider/usable-model')?.efforts,['medium']);

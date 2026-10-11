@@ -65,6 +65,7 @@ AI 在用户明确要求动态行为时可返回同一套可编辑配置，仍�
 - 日常调试的 WireMock 最多保留最近 1000 条请求，Requests 面板查询最近 200 条，旧记录会被淘汰；回归独立保留 5001 条作为超出 5000 条验证上限的检测依据。
 - Mock 编辑器支持导出 WireMock 批量 Mapping JSON 和 Postman Collection v2.1（含响应 Examples），可选包含未启用场景；桌面原生保存，浏览器下载。
 - Codex 通过 app-server model/list、OpenCode 通过 models --pure、Grok 通过 models 自动发现模型；AI 面板可选模型、刷新列表，按助手分别保留选择。
+- OpenCode 模型发现直接执行 `opencode models --pure --verbose`，由 PATH 解析命令，不在命令前拼接安装目录。
 - Spring URL 配置项按依赖 Real / Mock 切换，批量覆盖预览，Maven / Gradle 项目启停与启动输出。
 - 原子保存当前 Mock 和路由配置，持久化对话和最近项目。用户自行编辑、导出和备份 Mock。
 

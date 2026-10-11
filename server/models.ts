@@ -39,14 +39,15 @@ export async function discoverModels(agent:AgentInfo):Promise<AgentModel[]>{
   return index<0?models:models.map((model,i)=>i===index?{...model,isDefault:true}:model);
 }
 async function discoverModelCatalog(agent:AgentInfo):Promise<AgentModel[]>{
-  if(!agent.installed||!agent.path)throw new Error('请先安装并登录所选 CLI');
+  if(!agent.installed)throw new Error('请先安装并登录所选 CLI');
+  if(agent.id==='opencode'){
+    const {stdout}=await promisify(execFile)('opencode',['models','--pure','--verbose'],{cwd:os.tmpdir(),timeout:20000,maxBuffer:4*1024*1024,env:{...cliEnvironment(agent.path),OPENCODE_DISABLE_PROJECT_CONFIG:'true',OPENCODE_DISABLE_AUTOUPDATE:'true'}});
+    const models=parseOpenCodeModels(stdout);if(!models.length)throw new Error('OpenCode 未返回模型，请检查提供商配置');return models;
+  }
+  if(!agent.path)throw new Error('请先安装并登录所选 CLI');
   if(agent.id==='grok'){
     const {stdout}=await promisify(execFile)(agent.path,['models'],{cwd:os.tmpdir(),timeout:20000,maxBuffer:4*1024*1024,env:cliEnvironment(agent.path)});
     const models=parseGrokModels(stdout);if(!models.length)throw new Error('Grok 未返回模型，请在终端运行 grok login 完成登录');return models;
-  }
-  if(agent.id==='opencode'){
-    const {stdout}=await promisify(execFile)(agent.path,['models','--pure','--verbose'],{cwd:os.tmpdir(),timeout:20000,maxBuffer:4*1024*1024,env:{...cliEnvironment(agent.path),OPENCODE_DISABLE_PROJECT_CONFIG:'true',OPENCODE_DISABLE_AUTOUPDATE:'true'}});
-    const models=parseOpenCodeModels(stdout);if(!models.length)throw new Error('OpenCode 未返回模型，请检查提供商配置');return models;
   }
   if(agent.id!=='codex')throw new Error('不支持的 Agent');
   return new Promise((resolve,reject)=>{

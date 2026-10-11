@@ -20,7 +20,7 @@ test('Entry discovery selects an available OpenCode model when it is the only CL
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-opencode-model-'));
   const root=path.join(temp,'payment');
   await fs.cp('examples/payment-service',root,{recursive:true,filter:source=>!source.includes(`${path.sep}target`)&&!source.includes(`${path.sep}.mockingbird`)});
-  const executable=path.join(temp,'fake-opencode.cjs');
+  const executable=path.join(temp,'opencode');
   await fs.writeFile(executable,`#!/usr/bin/env node
 if(process.argv.includes('models')){
   console.log('opencode/usable-model');
@@ -31,6 +31,8 @@ if(process.argv.includes('models')){
 }
 process.exit(0);
 `,{mode:0o755});
+  const originalPath=process.env.PATH;
+  process.env.PATH=temp+path.delimiter+(originalPath||'');
   const service=await createServer({root:process.cwd(),dataDir:path.join(temp,'data')},0);
   service.projects.agents=[{id:'codex',installed:false},{id:'opencode',installed:true,path:executable},{id:'grok',installed:false}];
   const errors:string[]=[];
@@ -50,7 +52,7 @@ process.exit(0);
     await expect(models.locator('option[value="opencode/fast-model"]')).toHaveText('Fast Model · 已禁用');
     await expect(dialog.getByRole('button',{name:'开始扫描'})).toBeEnabled();
     expect(errors).toEqual([]);
-  }finally{await service.close();await fs.rm(temp,{recursive:true,force:true});}
+  }finally{if(originalPath===undefined)delete process.env.PATH;else process.env.PATH=originalPath;await service.close();await fs.rm(temp,{recursive:true,force:true});}
 });
 
 test('Confirmed AI entry discovery adds a project entry and opens a Flow',async({page})=>{
