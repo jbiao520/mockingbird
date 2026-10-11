@@ -106,6 +106,38 @@ process.stdin.on('end',()=>{
   }finally{await ctx.close();}
 });
 
+test('OpenCode entry discovery pins its session directory to the source snapshot',async()=>{
+  const ctx=await setup();
+  const inheritedPWD=process.env.PWD;
+  try{
+    const list=ctx.bench.index!.methods.find(method=>method.name==='listOrders')!;
+    const executable=path.join(ctx.temp,'fake-opencode.cjs');
+    await fs.writeFile(executable,`#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const args=process.argv.slice(2),value=key=>args[args.indexOf(key)+1];
+// OpenCode can resolve its session from PWD even when spawn's cwd is different.
+const sessionDirectory=args.includes('--dir')?value('--dir'):process.env.PWD;
+if(!fs.existsSync(path.join(sessionDirectory,'project/${legacyFile}')))throw new Error('未找到 project 目录');
+assert.equal(fs.realpathSync(sessionDirectory),fs.realpathSync(process.cwd()));
+assert.equal(fs.realpathSync(process.env.PWD),fs.realpathSync(process.cwd()));
+assert(args.includes('--dir'));assert.equal(value('--model'),'test/entry-model');assert.equal(value('--variant'),'medium');
+const config=JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+assert.equal(config.permission.read,'allow');assert.equal(config.permission.external_directory,'deny');
+const prompt=args.at(-1);assert(prompt.includes('只看订单控制器'));
+const result=${JSON.stringify({summary:'读取快照，找到订单入口',entries:[{method:'GET',path:'/legacy/orders',className:list.className,name:list.name,file:list.file,line:list.line,note:'类上没有 Controller 注解'}]})};
+console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(result)}}));
+`,{mode:0o755});
+    process.env.PWD=ctx.project;
+    ctx.bench.agents=[{id:'opencode',installed:true,path:executable}];
+    const task=await ctx.bench.discoverEntries({prompt:'只看订单控制器',agent:'opencode',model:'test/entry-model',effort:'medium'});
+    await wait(task);
+    assert.equal(task.status,'completed',task.error);
+    assert.equal(task.entryProposal?.length,1);
+    assert.equal(task.entryProposal?.[0].file,legacyFile);
+    assert.equal(ctx.bench.workspace.manualEntries?.length||0,0);
+  }finally{if(inheritedPWD===undefined)delete process.env.PWD;else process.env.PWD=inheritedPWD;await ctx.close();}
+});
+
 test('Reindex drops a manual entry when static discovery or the handler disappears',async()=>{
   const ctx=await setup();
   try{
