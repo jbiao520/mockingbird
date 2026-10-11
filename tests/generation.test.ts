@@ -10,6 +10,7 @@ import { indexProject } from '../server/analyzer';
 import type { Index } from '../server/analyzer';
 import type { Dependency, MockRule, Task } from '../shared/types';
 import { paymentDependencies } from './fixtures';
+import { reviewRuleEdit, ruleFingerprint } from '../shared/rule-edit';
 import { dependencyService } from '../shared/mock-routing';
 
 const bundleSource=`package dev.mockingbird.payment;
@@ -61,7 +62,7 @@ async function setup(){
   const executable=path.join(temp,'fake-grok.cjs');
   await fs.writeFile(executable,`#!/usr/bin/env node
 const fs=require('node:fs'),assert=require('node:assert/strict'),args=process.argv.slice(2),value=key=>args[args.indexOf(key)+1];
-assert.equal(value('--reasoning-effort'),'medium');assert.equal(value('--sandbox'),'read-only');assert.equal(value('--tools'),'read_file,grep,list_dir');assert(args.includes('--no-subagents'));assert(args.includes('--disable-web-search'));
+assert.equal(value('--reasoning-effort'),value('--model')==='grok-4.1-custom'?'high':'medium');assert.equal(value('--sandbox'),'read-only');assert.equal(value('--tools'),'read_file,grep,list_dir');assert(args.includes('--no-subagents'));assert(args.includes('--disable-web-search'));
 const prompt=fs.readFileSync(value('--prompt-file'),'utf8');
 fs.writeFileSync(process.argv[1]+'.prompt',prompt);
 if(prompt.includes('cancel-test')){setInterval(()=>{},1000);return;}
@@ -174,8 +175,8 @@ test('Branch prompts differ and invalid shapes, evidence, CLI failures or stale 
     const claimed=await ctx.bench.generateWithAgent({workflowId:ctx.wf.id,dependencyIds:[user.id],scenario:'success',agent:'grok'});
     await ctx.wait(claimed);assert.equal(claimed.status,'failed');assert.match(claimed.error||'',/运行或验证/);
     await ctx.writeResult(generated([user],[{id:'u_001',name:'Alex',active:true}]));
-    const fresh=await ctx.bench.generateWithAgent({workflowId:ctx.wf.id,dependencyIds:[user.id],scenario:'custom',customScenario:'库存不足',instructions:'custom-model',agent:'grok',model:'grok-4.1-custom'});
-    await ctx.wait(fresh);assert.equal(fresh.status,'completed',fresh.error);assert.equal(fresh.proposal?.[0].scenario,'库存不足');
+    const fresh=await ctx.bench.generateWithAgent({workflowId:ctx.wf.id,dependencyIds:[user.id],scenario:'custom',customScenario:'库存不足',instructions:'custom-model',agent:'grok',model:'grok-4.1-custom',effort:'high'});
+    await ctx.wait(fresh);assert.equal(fresh.status,'completed',fresh.error);assert.equal(fresh.proposal?.[0].scenario,'库存不足');assert.equal(fresh.generation?.effort,'high');assert.equal(fresh.effort,'high');
     const customPrompt=await fs.readFile(ctx.executable+'.prompt','utf8');assert.match(customPrompt,/库存不足/);assert.match(customPrompt,/custom-model/);
     const draft=paymentDependencies(ctx.bench.index!)[0];
     await ctx.bench.saveDependency(ctx.wf.id,{...draft,path:'/users/{accountId}'},user.id);
@@ -238,5 +239,64 @@ test('Nested source shapes are enforced before a generation proposal is complete
     const index=await indexProject(ctx.project);
     const rule=generateRules([bundle],index)[0];rule.body=validBundle;
     validateResponseContracts([rule],[bundle],index);
+  }finally{await ctx.close();}
+});
+
+function editResult(rule:MockRule,behavior:unknown=null){return{summary:'按金额配置条件响应，保留其余设置',ruleId:rule.id,status:rule.status,body:JSON.stringify(rule.body),headers:JSON.stringify(rule.headers),delay:rule.delay,behavior:behavior===null?null:JSON.stringify(behavior)};}
+
+test('Rule behavior editing uses the exact scenario and draft, preserves siblings, and only publishes on approval',async()=>{
+  const ctx=await setup();
+  try{
+    const bank=ctx.deps.find(dep=>dep.name.includes('Bank'))!;
+    const original=ctx.bench.generate([bank.id],'Success')[0];
+    const sibling={...structuredClone(original),id:crypto.randomUUID(),scenario:'Alternative',enabled:false};
+    await ctx.bench.setRules([original,sibling]);
+    const before=structuredClone(ctx.bench.workspace.rules);
+    const draft={...structuredClone(before[1]),delay:123};
+    const behavior={schemaVersion:1,sample:{path:bank.path,headers:{},body:{amount:88}},matchers:[],exceptions:[],bindings:[{target:'/approved',value:{kind:'condition',condition:{source:'body',field:'/amount',operator:'lte',value:1000},then:true,otherwise:false}}],cases:[{id:'large',name:'大额拒绝',patch:{body:{amount:1001}},expected:{matched:true,status:200,fields:{'/approved':false}},calls:1}]};
+    await ctx.writeResult(editResult(draft,behavior));
+    const task=await ctx.bench.editRule({agent:'grok',prompt:'金额超过 1000 时拒绝',rule:draft});await ctx.wait(task);
+    assert.equal(task.status,'completed',task.error);assert.equal(task.kind,'rule-edit');assert.equal(task.proposal?.[0].id,sibling.id);assert.equal(task.proposal?.[0].delay,123);
+    assert.deepEqual(ctx.bench.workspace.rules,before);assert.equal(task.approved,undefined);
+    const prompt=await fs.readFile(ctx.executable+'.prompt','utf8');assert(prompt.includes('未保存草稿'));assert(prompt.includes(sibling.id));assert(prompt.includes('"delay":123'));
+    const reviewed=ctx.bench.reviewTask(task.id);
+    const otherDraft={...before[0],delay:77};
+    const merged=reviewRuleEdit([otherDraft,draft],{...task,proposal:reviewed.rules});
+    assert.deepEqual(merged[0],otherDraft);assert.deepEqual(merged[1].behavior,behavior);
+    assert.throws(()=>reviewRuleEdit([otherDraft,{...draft,delay:999}],task),/草稿已变化/);
+    assert.deepEqual(reviewRuleEdit(merged,task),merged);
+    // A reviewer may refine the proposal before explicitly approving it.
+    merged[1]={...merged[1],delay:124,enabled:true};merged[0]={...merged[0],enabled:false};
+    await ctx.bench.setRules(merged,task.id);assert.equal(task.approved,true);
+    assert.equal(ctx.bench.workspace.rules.length,2);assert.equal(ctx.bench.workspace.rules[1].scenario,'Alternative');assert.equal(ctx.bench.workspace.rules[1].delay,124);
+    assert.deepEqual(ctx.bench.workspace.rules[1].behavior,behavior);
+    const configured=structuredClone(ctx.bench.workspace.rules[1]);
+    await ctx.writeResult(editResult(configured));
+    const remove=await ctx.bench.editRule({agent:'grok',prompt:'移除动态行为，恢复静态响应',rule:configured});await ctx.wait(remove);assert.equal(remove.status,'completed',remove.error);
+    const preservedSibling=structuredClone(ctx.bench.workspace.rules[0]);
+    await ctx.bench.approveTask(remove.id);assert.equal(remove.approved,true);assert.equal(ctx.bench.workspace.rules.length,2);
+    assert.deepEqual(ctx.bench.workspace.rules.find(r=>r.id===preservedSibling.id),preservedSibling);
+    assert.equal(ctx.bench.workspace.rules.find(r=>r.id===configured.id)!.behavior,undefined);
+  }finally{await ctx.close();}
+});
+
+test('Rule editing rejects wrong rule IDs, invalid behavior and stale saved rules without blocking manual edits',async()=>{
+  const ctx=await setup();
+  try{
+    const bank=ctx.deps.find(dep=>dep.name.includes('Bank'))!;
+    await ctx.bench.setRules(ctx.bench.generate([bank.id],'Success'));
+    const original=structuredClone(ctx.bench.workspace.rules[0]);
+    await ctx.writeResult({...editResult(original),ruleId:crypto.randomUUID()});
+    const wrong=await ctx.bench.editRule({agent:'grok',prompt:'修改行为',rule:original});await ctx.wait(wrong);assert.equal(wrong.status,'failed');assert.match(wrong.error!,/所选规则/);
+    await ctx.writeResult(editResult(original,{schemaVersion:1,sample:{path:original.path,headers:{}},cases:[],matchers:[],exceptions:[],bindings:[{target:'/absent',value:{kind:'now'}}]}));
+    const invalid=await ctx.bench.editRule({agent:'grok',prompt:'修改行为',rule:original});await ctx.wait(invalid);assert.equal(invalid.status,'failed');assert.match(invalid.error!,/字段不存在/);
+    await ctx.writeResult({...editResult(original),delay:222});
+    const task=await ctx.bench.editRule({agent:'grok',prompt:'修改延迟',rule:original});await ctx.wait(task);assert.equal(task.status,'completed',task.error);
+    await ctx.bench.setRules([{...original,delay:11}]);assert.notEqual(task.approved,true);
+    assert.throws(()=>ctx.bench.reviewTask(task.id),/规则已变化/);await assert.rejects(()=>ctx.bench.approveTask(task.id),/规则已变化/);
+    await assert.rejects(()=>ctx.bench.setRules(task.proposal,task.id),/规则已变化/);
+    await ctx.bench.setRules([{...ctx.bench.workspace.rules[0],delay:12}]);assert.equal(ctx.bench.workspace.rules[0].delay,12);
+    assert.notEqual(ruleFingerprint(original),ruleFingerprint(ctx.bench.workspace.rules[0]));
+    await assert.rejects(()=>ctx.bench.editRule({agent:'local',prompt:'修改行为',rule:original}),/已安装的 CLI/);
   }finally{await ctx.close();}
 });

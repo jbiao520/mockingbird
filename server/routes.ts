@@ -36,10 +36,12 @@ export async function writeRoutes(ws:Workspace,port:number){
 export class ProjectLauncher{
   state:LaunchStatus={status:'stopped',port:18080,logs:[]};child?:ChildProcess;
   constructor(private changed:()=>void){}
-  async start(ws:Workspace,port=18080){
+  async start(ws:Workspace,port=18080,signal?:AbortSignal){
+    signal?.throwIfAborted();
     if(!ws.project)throw new Error('请先导入项目');if(this.child)throw new Error('项目已启动，请先停止');await assertPort(port);
     const {executable,args,cwd:root,location,command,env}=await projectLaunchCommand(ws,port);
     if(!await exists(location))throw new Error('请先预览并应用路由配置');
+    signal?.throwIfAborted();
     this.state={status:'starting',port,logs:[`$ ${command}`],config:location,stale:false};this.changed();
     const child=spawn(executable,args,{cwd:root,detached:process.platform!=='win32',stdio:['ignore','pipe','pipe'],env});this.child=child;
     const log=(chunk:Buffer)=>{this.state.logs.push(redact(chunk.toString()));this.state.logs=this.state.logs.slice(-500);this.changed();};

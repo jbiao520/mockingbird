@@ -14,9 +14,11 @@ async function freePort(){const server=net.createServer();await new Promise<void
 export class BehaviorPreviewer {
   private active?:MockRuntime;
   private busy=false;
+  private lifetime=new AbortController();
   constructor(private jar:string){}
-  async close(){await this.active?.stop();}
+  async close(){this.lifetime.abort();await this.active?.stop();}
   async run(input:MockRule[],ruleId:string,cases?:BehaviorCase[],index?:Index,dependencies?:Dependency[]):Promise<BehaviorPreview[]>{
+    this.lifetime.signal.throwIfAborted();
     if(this.busy)throw new Error('已有行为预览正在运行，请等待完成');
     const rules=validateRules(input,dependencies),rule=rules.find(r=>r.id===ruleId);if(!rule)throw new Error('预览行为不存在');
     const behavior=rule.behavior||createBehavior(rule);
@@ -25,9 +27,10 @@ export class BehaviorPreviewer {
     this.busy=true;let directory:string|undefined;
     try{
       directory=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-preview-'));const port=await freePort();
+      this.lifetime.signal.throwIfAborted();
       const runtime=new MockRuntime(this.jar,directory,()=>{});this.active=runtime;
       // Preview the selected API independently, including an unpublished disabled scenario.
-      await runtime.start(port,[{...rule,enabled:true}]);
+      await runtime.start(port,[{...rule,enabled:true}],this.lifetime.signal);
       const reports:BehaviorPreview[]=[];
       for(const test of tests){
         await runtime.admin('scenarios/reset','POST');await runtime.admin('requests','DELETE');
@@ -35,14 +38,16 @@ export class BehaviorPreviewer {
         if(url.origin!==`http://127.0.0.1:${port}`||url.pathname.startsWith('/__admin'))throw new Error('样例路径非法');
         const calls:BehaviorPreview['calls']=[];
         for(let n=0;n<test.calls;n++){
+          this.lifetime.signal.throwIfAborted();
           const started=Date.now();let status=0,text='',body:unknown,fault:string|undefined;const errors:string[]=[];
           try{
-            const response=await fetch(url,{method:rule.method,headers:{'Content-Type':'application/json',...sample.headers},body:['GET','HEAD'].includes(rule.method)||sample.body===undefined?undefined:JSON.stringify(sample.body),redirect:'error',signal:AbortSignal.timeout(35000)});
+            const response=await fetch(url,{method:rule.method,headers:{'Content-Type':'application/json',...sample.headers},body:['GET','HEAD'].includes(rule.method)||sample.body===undefined?undefined:JSON.stringify(sample.body),redirect:'error',signal:AbortSignal.any([AbortSignal.timeout(35000),this.lifetime.signal])});
             status=response.status;text=await response.text();
             if(text.length>1024*1024)throw new Error('响应超过 1MB');
             try{body=JSON.parse(text);}catch{if(rule.method!=='HEAD'&&![204,304].includes(status)&&response.headers.get('content-type')?.includes('json'))errors.push('渲染结果不是合法 JSON');}
             if(status===500&&/HandlebarsException|UncheckedExecutionException|JsonException/.test(text))errors.push('动态响应渲染失败，请检查字段来源和条件');
           }catch(e){fault=(e as Error).message;}
+          this.lifetime.signal.throwIfAborted();
           const journal=await runtime.requests(),latest=journal[0];const matched=Boolean(latest?.matched&&latest.ruleId===rule.id);
           if(test.expected.matched!==undefined&&matched!==test.expected.matched)errors.push(test.expected.matched?'未命中当前行为':'意外命中当前行为');
           // Expectations apply to the last call, so retry cases assert the eventual result.

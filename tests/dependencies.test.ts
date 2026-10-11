@@ -100,7 +100,7 @@ test('Grok CLI generates reviewable mocks, honors selected model and handles err
     const result={summary:'Grok 候选',dependencies:[],rules:[{dependencyId:dep.id,status:200,body:JSON.stringify({id:'u_001',name:'Alex',active:true})}]};
     await fs.writeFile(executable,`#!/usr/bin/env node
 const fs=require('node:fs'),assert=require('node:assert/strict'),args=process.argv.slice(2),value=key=>args[args.indexOf(key)+1];
-assert.equal(value('--reasoning-effort'),'medium');assert.equal(value('--sandbox'),'read-only');assert.equal(value('--tools'),'read_file,grep,list_dir');assert.equal(value('--deny'),'MCPTool');assert(args.includes('--no-subagents'));assert(args.includes('--disable-web-search'));assert.equal(value('--permission-mode'),'dontAsk');
+assert.equal(value('--reasoning-effort'),value('--model')==='grok-4.1-custom'?'high':'medium');assert.equal(value('--sandbox'),'read-only');assert.equal(value('--tools'),'read_file,grep,list_dir');assert.equal(value('--deny'),'MCPTool');assert(args.includes('--no-subagents'));assert(args.includes('--disable-web-search'));assert.equal(value('--permission-mode'),'dontAsk');
 assert(fs.existsSync('project/project-context.json'));assert.equal(fs.realpathSync(value('--cwd')),fs.realpathSync(process.cwd()));
 const prompt=fs.readFileSync(value('--prompt-file'),'utf8');
 if(prompt.includes('cancel-test'))setInterval(()=>{},1000);
@@ -111,7 +111,7 @@ else{assert.equal(value('--model'),prompt.includes('custom-test')?'grok-4.1-cust
     const wait=async(task:Task)=>{for(let i=0;i<150&&task.status==='running';i++)await new Promise(r=>setTimeout(r,20));assert.notEqual(task.status,'running');};
     const task=await bench.chat('grok','生成 Mock');await wait(task);assert.equal(task.status,'completed',task.error);assert.equal(task.proposal?.length,1);assert.equal(bench.workspace.rules.length,0);assert.deepEqual(task.proposal?.[0].service,dependencyService(dep));
     await bench.approveTask(task.id);assert.equal(bench.workspace.rules.length,1);
-    const custom=await bench.chat('grok','custom-test','grok-4.1-custom');await wait(custom);assert.equal(custom.status,'completed',custom.error);
+    const custom=await bench.chat('grok','custom-test','grok-4.1-custom',undefined,'high');await wait(custom);assert.equal(custom.status,'completed',custom.error);
     const failed=await bench.chat('grok','error-test');await wait(failed);assert.equal(failed.status,'failed');assert.match(failed.error!,/test failure/);
     const cancelled=await bench.chat('grok','cancel-test');bench.agentManager.cancel(cancelled.id);assert.equal(cancelled.status,'cancelled');
     await bench.close();

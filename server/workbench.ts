@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import type { State, Workspace, MockRule, Task, Message, Workflow } from '../shared/types';
-import { readSource, type Index } from './analyzer';
+import { readSource, propertyForSource, type Index } from './analyzer';
 import { emptyWorkspace, saveWorkspace, loadWorkspace, atomicWrite } from './storage';
 import { MockRuntime, redact } from './runtime';
 import { detectAgents, AgentManager } from './agents';
@@ -17,10 +17,11 @@ import { compute } from './analysis';
 import { generateRequestTemplate, validateEntryRequest } from './request-shape';
 import { confirmDependency, pruneWorkflow } from './dependencies';
 import { BehaviorPreviewer } from './behavior-preview';
+import { ruleFingerprint } from '../shared/rule-edit';
 import { behaviorCaseSchema } from './behavior-schema';
 const exec=promisify(execFile);
 function dependencyFingerprint(wf:Workflow,ids:string[]){return ids.map(id=>{const dep=wf.dependencies.find(item=>item.id===id);return dep?`${dep.id}\t${dep.method}\t${dep.path}\t${dep.responseType||''}\t${dep.status}\t${dep.configKey||''}\t${dep.originalBase||''}`:`missing:${id}`;}).join('\n');}
-export interface Options { root:string; dataDir:string; runtimeDir?:string; samplePath?:string; desktop?:boolean; chooseDirectory?:()=>Promise<string|null>;saveExport?:(artifact:{filename:string;content:string})=>Promise<string|null> }
+export interface Options { root:string; dataDir:string; runtimeDir?:string; samplePath?:string; desktop?:boolean; managed?:boolean;agents?:State['agents'];chooseDirectory?:(clientId?:string)=>Promise<string|null>;saveExport?:(artifact:{filename:string;content:string},clientId?:string)=>Promise<string|null>;focusWindow?:(clientId:string)=>Promise<boolean>;openProjectWindow?:(projectId:string,clientId:string)=>Promise<void> }
 export class Workbench extends EventEmitter{
   workspace:Workspace=emptyWorkspace();index?:Index;
   runtime:MockRuntime;previewer:BehaviorPreviewer;launcher:ProjectLauncher;agents:State['agents']=[];agentManager:AgentManager;
@@ -29,6 +30,9 @@ export class Workbench extends EventEmitter{
   private watcher?:FSWatcher;
   private sourceChanged=false;
   private mutationTail:Promise<unknown>=Promise.resolve();
+  private lifetime=new AbortController();
+  private requests=new Set<Promise<unknown>>();
+  private closePromise?:Promise<void>;
   constructor(public options:Options){
     super();this.runtime=new MockRuntime(path.join(options.runtimeDir||path.join(options.root,'runtime'),'wiremock-standalone-3.13.2.jar'),path.join(options.dataDir,'wiremock'),()=>this.changed());
     this.previewer=new BehaviorPreviewer(this.runtime.jar);
@@ -38,8 +42,9 @@ export class Workbench extends EventEmitter{
       await saveWorkspace(this.workspace);this.changed();
     });
   }
-  async init(){await fs.mkdir(this.options.dataDir,{recursive:true});await this.runtime.init();this.agents=await detectAgents();try{this.recent=JSON.parse(await fs.readFile(path.join(this.options.dataDir,'recent.json'),'utf8'));}catch{/* initial state */}}
+  async init(){await fs.mkdir(this.options.dataDir,{recursive:true});await this.runtime.init();this.agents=this.options.agents||await detectAgents();if(!this.options.managed)try{this.recent=JSON.parse(await fs.readFile(path.join(this.options.dataDir,'recent.json'),'utf8'));}catch{/* initial state */}}
   changed(){this.emit('change');}
+  get signal(){return this.lifetime.signal;}
   state():State{return{workspace:this.workspace,runtime:this.runtime.state,launch:this.launcher.state,tasks:this.agentManager.tasks,agents:this.agents,recent:this.recent,problems:[...(this.sourceChanged?['源码或配置发生变化，请重新索引并分析 Flow']:[]),...this.problems,...(this.workspace.project?.warnings||[]),...(this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId)?.warnings||[])],terminal:this.terminal,samplePath:this.options.samplePath||path.join(this.options.root,'examples/payment-service'),desktop:Boolean(this.options.desktop),indexing:this.indexing};}
   private watchProject(){
     this.watcher?.close();this.sourceChanged=false;
@@ -55,30 +60,31 @@ export class Workbench extends EventEmitter{
     }catch{this.problems.push('无法监测源码变更，请使用重新索引按钮更新项目');}
   }
   private requireFreshIndex(){if(this.sourceChanged)throw new Error('源码或配置发生变化，请先重新索引，再分析 Flow');return this.requireIndex();}
-  serial<T>(fn:()=>Promise<T>):Promise<T>{const run=this.mutationTail.then(fn,fn);this.mutationTail=run.catch(()=>{});return run;}
+  assertRevision(revision:string){if(this.requireFreshIndex().project.revision!==revision)throw new Error('草稿对应的源码版本已过期，请重新索引并审核或重新生成规则');}
+  serial<T>(fn:()=>Promise<T>):Promise<T>{const guarded=()=>{if(this.lifetime.signal.aborted)throw new Error('项目正在关闭');return fn();};const run=this.mutationTail.then(guarded,guarded);this.mutationTail=run.catch(()=>{});return run;}
+  track<T>(fn:()=>Promise<T>):Promise<T>{if(this.lifetime.signal.aborted)return Promise.reject(new Error('项目正在关闭'));const run=Promise.resolve().then(fn);this.requests.add(run);void run.finally(()=>this.requests.delete(run)).catch(()=>{});return run;}
   requireIndex(){if(!this.index)throw new Error('请先导入 Java 项目');return this.index;}
   activeWorkflow(){const wf=this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId);if(!wf)throw new Error('请先分析 API Flow');return wf;}
   addMessage(role:Message['role'],content:string,taskId?:string,action?:Message['action']){this.workspace.messages.push({id:randomUUID(),role,content:redact(content),at:new Date().toISOString(),taskId,action});this.workspace.messages=this.workspace.messages.slice(-100);}
   async importProject(projectPath:string){
     if(this.agentManager.tasks.some(t=>t.status==='running'))throw new Error('请先取消运行中的 Agent 任务');
     let index:Index;this.indexing='扫描 Java 项目';this.changed();
-    try{index=await compute<Index>(this.options.root,'index',{path:projectPath},message=>{this.indexing=message;this.changed();});}finally{this.indexing=undefined;this.changed();}
+    try{index=await compute<Index>(this.options.root,'index',{path:projectPath},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}
     const loaded=await loadWorkspace(index.project.path);
     await this.runtime.stop();await this.launcher.stop();
     this.index=index;this.workspace={...loaded,project:index.project};this.agentManager.tasks=[];
     const routeFile=path.join(index.project.path,'.mockingbird/routes.properties');
     try{const config=await fs.readFile(routeFile,'utf8'),savedPort=/=http:\/\/127\.0\.0\.1:(\d+)/.exec(config)?.[1];if(savedPort)this.runtime.state.port=Number(savedPort);}catch{/* routes not yet applied */}
     if(this.workspace.workflows.some(w=>w.revision!==index.project.revision))this.problems=['源码发生变化，保存的 Flow 可能过期，请重新分析'];else this.problems=[];
-    this.recent=[{name:index.project.name,path:index.project.path,openedAt:new Date().toISOString()},...this.recent.filter(r=>r.path!==index.project.path)].slice(0,12);
-    await atomicWrite(path.join(this.options.dataDir,'recent.json'),this.recent);this.watchProject();this.changed();return this.state();
+    if(!this.options.managed){this.recent=[{name:index.project.name,path:index.project.path,openedAt:new Date().toISOString()},...this.recent.filter(r=>r.path!==index.project.path)].slice(0,12);await atomicWrite(path.join(this.options.dataDir,'recent.json'),this.recent);}this.watchProject();this.changed();return this.state();
   }
-  async reindex(){let index:Index;this.indexing='重新索引';this.changed();try{index=await compute<Index>(this.options.root,'index',{path:this.requireIndex().project.path},message=>{this.indexing=message;this.changed();});}finally{this.indexing=undefined;this.changed();}this.index=index;this.workspace.project=index.project;this.problems=this.workspace.workflows.some(w=>w.revision!==index.project.revision)?['源码发生变化，Flow 已过期，请核对依赖并确认源码版本']:[];this.watchProject();this.changed();return this.state();}
+  async reindex(){let index:Index;this.indexing='重新索引';this.changed();try{index=await compute<Index>(this.options.root,'index',{path:this.requireIndex().project.path},message=>{this.indexing=message;this.changed();},this.lifetime.signal);}finally{this.indexing=undefined;this.changed();}this.index=index;this.workspace.project=index.project;this.problems=this.workspace.workflows.some(w=>w.revision!==index.project.revision)?['源码发生变化，Flow 已过期，请核对依赖并确认源码版本']:[];this.watchProject();this.changed();return this.state();}
   async analyzeEntry(id:string){
     const index=this.requireFreshIndex(),old=this.workspace.workflows.find(w=>w.entry.id===id);
     const entry=index.project.entries.find(e=>e.id===id);if(!entry)throw new Error('API 入口不存在，请重新索引');
     // Reopening never discards manually confirmed dependencies, even after a source change.
     if(old){this.workspace.activeWorkflowId=old.id;await saveWorkspace(this.workspace);this.changed();return old;}
-    const wf=await compute<Workflow>(this.options.root,'analyze',{index,entryId:id});
+    const wf=await compute<Workflow>(this.options.root,'analyze',{index,entryId:id},undefined,this.lifetime.signal);
     this.workspace.workflows.push(wf);this.workspace.activeWorkflowId=wf.id;
     this.addMessage('assistant',`已打开 ${wf.entry.method} ${wf.entry.path}。请手动添加 HTTP 依赖，或指挥 AI 发现并确认依赖。`,undefined,'workflow');
     await saveWorkspace(this.workspace);this.changed();return wf;
@@ -115,7 +121,7 @@ export class Workbench extends EventEmitter{
     if(!wf)throw new Error('Flow 不存在');
     for(const dep of wf.dependencies){
       if(dep.evidence.file&&!index.sources.has(dep.evidence.file))throw new Error(dep.name+' 的源码文件已移除，请先编辑或移除此依赖');
-      if(dep.configKey&&index.properties[dep.configKey]?.replace(/\/$/,'')!==dep.originalBase)throw new Error(dep.name+' 的配置地址已变化，请先编辑并确认');
+      if(dep.configKey&&propertyForSource(index,dep.configKey,wf.entry.file)?.replace(/\/$/,'')!==dep.originalBase)throw new Error(dep.name+' 的配置地址已变化，请先编辑并确认');
     }
     wf.revision=index.project.revision;wf.analyzedAt=new Date().toISOString();await saveWorkspace(ws);this.workspace=ws;this.changed();
   }
@@ -131,7 +137,7 @@ export class Workbench extends EventEmitter{
     return rules;
   }
   async generateWithAgent(input:unknown){
-    const parsed=z.object({workflowId:z.string().min(1),dependencyIds:z.array(z.string().min(1)).min(1).max(100),scenario:z.enum(['success','rejection','custom']),customScenario:z.string().max(100).optional(),instructions:z.string().max(4000).optional(),agent:z.string().min(1),model:z.string().max(200).optional()}).parse(input);
+    const parsed=z.object({workflowId:z.string().min(1),dependencyIds:z.array(z.string().min(1)).min(1).max(100),scenario:z.enum(['success','rejection','custom']),customScenario:z.string().max(100).optional(),instructions:z.string().max(4000).optional(),agent:z.string().min(1),model:z.string().max(200).optional(),effort:z.string().max(100).optional()}).parse(input);
     if(parsed.agent==='local')throw new Error('源码生成必须选择已安装的 CLI，不能使用本地模板');
     const index=this.requireFreshIndex(),wf=this.workspace.workflows.find(item=>item.id===parsed.workflowId);
     if(!wf)throw new Error('Flow 不存在');
@@ -142,17 +148,35 @@ export class Workbench extends EventEmitter{
     if(!scenarioName)throw new Error('请填写自定义场景');
     const info=this.agents.find(agent=>agent.id===parsed.agent);
     if(!info?.installed||!info.path)throw new Error('所选 Agent 未安装，已停止。不会改用本地模板。');
-    const scope={dependencyIds:deps.map(dep=>dep.id),scenario:parsed.scenario,scenarioName,instructions:(parsed.instructions||'').trim(),model:parsed.model?.trim()||undefined,fingerprint:dependencyFingerprint(wf,parsed.dependencyIds)};
+    const scope={dependencyIds:deps.map(dep=>dep.id),scenario:parsed.scenario,scenarioName,instructions:(parsed.instructions||'').trim(),model:parsed.model?.trim()||undefined,effort:parsed.effort,fingerprint:dependencyFingerprint(wf,parsed.dependencyIds)};
     const launch:GenerationLaunch={workflow:structuredClone(wf),scope};
     this.addMessage('user',`根据源码为 ${wf.entry.method} ${wf.entry.path} 的 ${deps.map(dep=>dep.name).join('、')} 生成「${scenarioName}」Mock${scope.instructions?'。'+scope.instructions:''}`);
     await saveWorkspace(this.workspace);
-    return this.agentManager.run(info,scope.instructions||scenarioName,index,this.workspace,scope.model,launch);
+    return this.agentManager.run(info,scope.instructions||scenarioName,index,this.workspace,scope.model,launch,scope.effort);
+  }
+  async editRule(input:unknown){
+    const data=z.object({agent:z.string(),prompt:z.string().trim().min(1).max(10000),model:z.string().optional(),effort:z.string().optional(),rule:z.unknown()}).parse(input);
+    const index=this.requireFreshIndex();
+    const [rule]=validateRules([data.rule],this.workspace.workflows.flatMap(w=>w.dependencies));
+    const workflow=this.workspace.workflows.find(w=>w.dependencies.some(d=>d.id===rule.dependencyId&&d.status!=='unresolved'));
+    if(!workflow||workflow.revision!==index.project.revision)throw new Error('规则对应的 Flow 不存在或已过期');
+    const saved=this.workspace.rules.find(r=>r.id===rule.id);
+    if(saved&&saved.dependencyId!==rule.dependencyId)throw new Error('不能修改规则对应的依赖');
+    const agent=this.agents.find(a=>a.id===data.agent);
+    if(!agent?.installed||!agent.path)throw new Error('AI 修改必须选择已安装的 CLI');
+    const scope={rule:structuredClone(rule),savedFingerprint:ruleFingerprint(saved),dependencyFingerprint:dependencyFingerprint(workflow,[rule.dependencyId])};
+    this.workspace.selectedAgent=agent.id;this.addMessage('user',`修改 ${rule.name} · ${rule.scenario}：${data.prompt}`);await saveWorkspace(this.workspace);
+    return this.agentManager.run(agent,data.prompt,index,this.workspace,data.model,undefined,data.effort,{workflow:structuredClone(workflow),scope});
   }
   private assertTaskFresh(task:Task){
     let index:Index;try{index=this.requireFreshIndex();}catch{throw new Error('源码或配置已变化，AI 候选已过期，请重新索引并重新生成');}
     if(!task.workflowId||task.revision!==index.project.revision)throw new Error('AI 候选绑定的源码版本已过期，请重新生成');
     const wf=this.workspace.workflows.find(item=>item.id===task.workflowId);
     if(!wf||wf.revision!==index.project.revision)throw new Error('AI 候选绑定的 Flow 已过期，请核对依赖后重新生成');
+    if(task.ruleEdit){
+      if(ruleFingerprint(this.workspace.rules.find(r=>r.id===task.ruleEdit!.rule.id))!==task.ruleEdit.savedFingerprint)throw new Error('规则已变化，AI 修改建议已过期，请重新请求');
+      if(dependencyFingerprint(wf,[task.ruleEdit.rule.dependencyId])!==task.ruleEdit.dependencyFingerprint)throw new Error('规则对应的依赖已变化，请重新请求');
+    }
     if(task.generation&&dependencyFingerprint(wf,task.generation.dependencyIds)!==task.generation.fingerprint)throw new Error('所选依赖已变化，AI 候选不能应用，请重新生成');
   }
   reviewTask(id:string){
@@ -162,9 +186,10 @@ export class Workbench extends EventEmitter{
     if(task.revision)this.assertTaskFresh(task);
     return{rules:task.proposal};
   }
-  async setRules(input:unknown){
+  async setRules(input:unknown,reviewTaskId?:string){
     const dependencies=this.workspace.workflows.flatMap(w=>w.dependencies),rules=validateRules(input,dependencies);
-    for(const task of this.agentManager.tasks)if(task.proposal?.length&&!task.approved&&task.revision&&task.proposal.some(proposal=>rules.some(rule=>rule.id===proposal.id)))this.assertTaskFresh(task);
+    if(reviewTaskId){const task=this.agentManager.tasks.find(t=>t.id===reviewTaskId);if(!task?.ruleEdit||task.status!=='completed'||task.approved)throw new Error('没有可批准的行为修改');this.assertTaskFresh(task);if(!rules.some(r=>r.id===task.ruleEdit!.rule.id&&r.dependencyId===task.ruleEdit!.rule.dependencyId))throw new Error('批准的规则不存在');}
+    for(const task of this.agentManager.tasks)if(task.proposal?.length&&!task.approved&&task.revision&&task.proposal.some(proposal=>rules.some(rule=>rule.id===proposal.id&&(!task.ruleEdit||task.id===reviewTaskId||ruleFingerprint({...rule,version:0})===ruleFingerprint({...proposal,version:0})))))this.assertTaskFresh(task);
     for(const rule of rules){if(!dependencies.some(d=>d.id===rule.dependencyId))throw new Error(`规则 ${rule.name} 对应的依赖已不存在，请重新生成`);if(rule.evidence?.length)assertSourceEvidence(rule.evidence,this.requireIndex());}
     validateResponseContracts(rules,dependencies,this.requireIndex());
     for(const rule of rules.filter(r=>r.enabled&&r.behavior)){
@@ -178,7 +203,7 @@ export class Workbench extends EventEmitter{
     const ws={...this.workspace,rules:next};
     try{await saveWorkspace(ws);}catch(e){await this.runtime.publish(previous);throw e;}
     this.workspace=ws;
-    for(const task of this.agentManager.tasks)if(task.proposal?.length&&task.proposal.every(r=>next.some(n=>n.id===r.id)))task.approved=true;
+    for(const task of this.agentManager.tasks)if(task.proposal?.length&&task.proposal.every(r=>next.some(n=>n.id===r.id&&(!task.ruleEdit||task.id===reviewTaskId||ruleFingerprint({...n,version:0})===ruleFingerprint({...r,version:0})))))task.approved=true;
     this.problems=[];this.changed();return next;
   }
   async setRoutes(input:Record<string,'real'|'mock'>,launchPort=18080){
@@ -190,6 +215,11 @@ export class Workbench extends EventEmitter{
       if(route==='mock'&&(!dep.configKey||dep.status==='unresolved'))throw new Error(`${dep.name} 无法自动路由：URL 未解析或没有可覆盖的配置项`);
       dep.route=route;
     }
+    for(const wf of ws.workflows)for(const dep of wf.dependencies.filter(d=>d.route==='mock')){
+      const index=this.requireFreshIndex();
+      if(wf.revision!==index.project.revision)throw new Error('Flow 已过期，请核对依赖并确认源码版本');
+      if(dep.configKey&&propertyForSource(index,dep.configKey,wf.entry.file)?.replace(/\/$/,'')!==dep.originalBase)throw new Error(dep.name+' 的配置地址已变化，请先编辑并确认');
+    }
     const preview=await routePreview(ws,this.runtime.state.port,launchPort);return {workspace:ws,preview};
   }
   async applyRoutes(input:Record<string,'real'|'mock'>){
@@ -199,7 +229,7 @@ export class Workbench extends EventEmitter{
     this.workspace=ws;if(this.launcher.child)this.launcher.state.stale=true;this.changed();return preview;
   }
 
-  async chat(agent:string,prompt:string,model?:string,workflowId?:string){
+  async chat(agent:string,prompt:string,model?:string,workflowId?:string,effort?:string){
     if(!prompt.trim()||prompt.length>10000)throw new Error('请输入 1–10,000 字符的请求');this.requireFreshIndex();
     if(workflowId)await this.selectWorkflow(workflowId);
     this.workspace.selectedAgent=agent;this.addMessage('user',prompt);await saveWorkspace(this.workspace);
@@ -219,14 +249,18 @@ export class Workbench extends EventEmitter{
       const entry=this.workspace.project!.entries.find(e=>prompt.includes(e.path))||(!this.activeWorkflowSafe()?this.workspace.project!.entries[0]:undefined);
       if(entry&&this.activeWorkflowSafe()?.entry.id!==entry.id)await this.analyzeEntry(entry.id);
     }
-    return this.agentManager.run(info,prompt,this.index!,this.workspace,model);
+    return this.agentManager.run(info,prompt,this.index!,this.workspace,model,undefined,effort);
   }
   activeWorkflowSafe(){return this.workspace.workflows.find(w=>w.id===this.workspace.activeWorkflowId);}
   async approveTask(id:string){
     const task=this.agentManager.tasks.find(t=>t.id===id);if(!task?.proposal?.length)throw new Error('没有候选规则');
     if(task.approved)throw new Error('候选已经应用');
     if(task.revision)this.assertTaskFresh(task);
-    if(task.kind==='generate'&&task.generation){
+    if(task.status!=='completed')throw new Error('任务尚未完成');
+    if(task.ruleEdit){
+      const id=task.ruleEdit.rule.id;
+      await this.setRules([...this.workspace.rules.filter(rule=>rule.id!==id),...task.proposal]);
+    }else if(task.kind==='generate'&&task.generation){
       const selected=new Set(task.generation.dependencyIds),proposalIds=new Set(task.proposal.map(rule=>rule.id));
       await this.setRules([...this.workspace.rules.filter(rule=>!proposalIds.has(rule.id)).map(rule=>selected.has(rule.dependencyId)?{...rule,enabled:false}:rule),...task.proposal]);
     }else{const replace=new Set(task.proposal.map(r=>r.id)),deps=new Set(task.proposal.map(r=>r.dependencyId));await this.setRules([...this.workspace.rules.filter(r=>!replace.has(r.id)&&!deps.has(r.dependencyId)),...task.proposal]);}
@@ -244,15 +278,15 @@ export class Workbench extends EventEmitter{
     if(data.target==='project'&&data.entryId){const index=this.requireFreshIndex();if(data.revision!==index.project.revision)throw new Error('请求样例已过期，请重新点击“验证入口 API”');warnings=validateEntryRequest(index,data.entryId,data).warnings;}
     const runtime=data.target==='mock'?this.runtime.state:this.launcher.state;if(runtime.status!=='running')throw new Error('目标服务尚未运行');
     const url=`http://127.0.0.1:${runtime.port}${data.path}`;const started=Date.now();
-    const response=await fetch(url,{method:data.method,headers:{'Content-Type':'application/json',...data.headers},body:['GET','HEAD'].includes(data.method)||data.body===undefined?undefined:JSON.stringify(data.body),redirect:'error',signal:AbortSignal.timeout(35000)});
+    const response=await fetch(url,{method:data.method,headers:{'Content-Type':'application/json',...data.headers},body:['GET','HEAD'].includes(data.method)||data.body===undefined?undefined:JSON.stringify(data.body),redirect:'error',signal:AbortSignal.any([AbortSignal.timeout(35000),this.lifetime.signal])});
     const body=redact((await response.text()).slice(0,1024*1024));
     return{status:response.status,headers:Object.fromEntries(response.headers),body,duration:Date.now()-started,url,warnings};
   }
   async terminalCommand(command:string){
     const choices:Record<string,[string,string[]]>={'java --version':['java',['--version']],'mvn --version':['mvn',['--version']],'git status --short':['git',['status','--short']],'git rev-parse HEAD':['git',['rev-parse','HEAD']]};
     const spec=choices[command];if(!spec)throw new Error('首版终端仅允许列表中的诊断命令');
-    this.terminal.push('$ '+command);try{const result=await exec(spec[0],spec[1],{cwd:this.index?.project.path||this.options.root,timeout:10000,maxBuffer:1024*1024});this.terminal.push(redact(result.stdout+result.stderr));}catch(e){this.terminal.push(redact((e as Error).message));}this.terminal=this.terminal.slice(-100);this.changed();
+    this.terminal.push('$ '+command);try{const result=await exec(spec[0],spec[1],{cwd:this.index?.project.path||this.options.root,timeout:10000,maxBuffer:1024*1024,signal:this.lifetime.signal});this.terminal.push(redact(result.stdout+result.stderr));}catch(e){this.terminal.push(redact((e as Error).message));}this.terminal=this.terminal.slice(-100);this.changed();
   }
   source(relative:string){return readSource(this.requireIndex(),relative);}
-  async close(){this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.previewer.close(),this.runtime.stop(),this.launcher.stop()]);}
+  close(){if(!this.closePromise)this.closePromise=(async()=>{this.lifetime.abort();this.watcher?.close();await Promise.all([this.agentManager.stopAll(),this.previewer.close()]);await Promise.allSettled([this.mutationTail,...this.requests]);await this.agentManager.stopAll();await Promise.all([this.previewer.close(),this.runtime.stop(),this.launcher.stop()]);await saveWorkspace(this.workspace);})();return this.closePromise;}
 }

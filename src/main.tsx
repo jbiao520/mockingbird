@@ -1,9 +1,8 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { loader } from '@monaco-editor/react';
-import * as monaco from 'monaco-editor/editor/editor.api.js';
-import 'monaco-editor/languages/definitions/java/register.js';
-import 'monaco-editor/language/json/monaco.contribution.js';
+// Register editor services before the first project creates a Monaco instance.
+import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 import JsonWorker from 'monaco-editor/language/json/json.worker.js?worker';
 import App from './App';

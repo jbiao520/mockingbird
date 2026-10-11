@@ -8,14 +8,14 @@ import { paymentDependencies } from '../tests/fixtures';
 import { mockRequestPath } from '../shared/mock-routing';
 const root=process.cwd(),temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-e2e-')),project=path.join(temp,'payment-service');
 await fs.cp(path.join(root,'examples/payment-service'),project,{recursive:true,filter:s=>!s.includes('/target')&&!s.includes('/.mockingbird')});
-// Exercise base-path routing through all four real Java HTTP clients.
+// Exercise application context-path and base-path routing through all four real Java HTTP clients.
 const configuration=path.join(project,'src/main/resources/application.properties');
-await fs.writeFile(configuration,(await fs.readFile(configuration,'utf8')).replace(/^(services\.[\w.-]+\.url=http[^\r\n]+)$/gm,'$1/v1'));
+await fs.writeFile(configuration,(await fs.readFile(configuration,'utf8')).replace(/^(services\.[\w.-]+\.url=http[^\r\n]+)$/gm,'$1/v1')+'\nserver.servlet.context-path=/shop\n');
 const bench=new Workbench({root,dataDir:path.join(temp,'data')});
 const report:{step:string;result:string}[]=[];
 const pass=(step:string,result:string)=>{report.push({step,result});console.log('✓ '+step+' — '+result);};
 async function waitLaunch(){const start=Date.now();while(Date.now()-start<160000){if(bench.launcher.state.status==='running')return;if(bench.launcher.state.status==='failed')throw new Error(bench.launcher.state.error+'\n'+bench.launcher.state.logs.join(''));await new Promise(r=>setTimeout(r,400));}throw new Error('Java startup timed out');}
-const request={target:'project' as const,method:'POST',path:'/api/payment/create',body:{userId:'u_001',sku:'sku_001',quantity:1,amount:128}};
+const request={target:'project' as const,method:'POST',path:'/shop/api/payment/create',body:{userId:'u_001',sku:'sku_001',quantity:1,amount:128}};
 try{
   await bench.init();await bench.importProject(project);const original=bench.index!.project.revision;
   const entry=bench.workspace.project!.entries.find(e=>e.path==='/api/payment/create')!;assert(entry);pass('Import','Maven, Java 17, 2 Controller entries');
@@ -32,8 +32,11 @@ try{
   await bench.setRules(rules);pass('Request matchers','Query, header and JSON body matched; mismatches returned 404 and appeared in journal');
   const routes=Object.fromEntries(wf.dependencies.map(d=>[d.id,'mock' as const]));const preview=await bench.setRoutes(routes);assert.equal(preview.preview.changes.length,4);await bench.applyRoutes(routes);pass('Routing','4 Spring property overrides saved');
   await bench.launcher.start(bench.workspace,18180);await waitLaunch();
-  const first=await bench.testRequest(request);assert.equal(first.status,200);assert.equal(JSON.parse(first.body).status,'COMPLETED');
-  const logs=(await bench.runtime.requests()).filter(l=>!l.url.includes('?'));assert.equal(new Set(logs.filter(l=>l.matched).map(l=>l.url)).size,4);assert(logs.every(l=>l.status===200));pass('Entry API verification','Actual Spring Boot payment request hit all 4 downstream mocks, COMPLETED');
+  const template=bench.requestTemplate(entry.id);assert.equal(template.path,request.path);
+  const entryRequest={...template,...request};
+  await assert.rejects(()=>bench.testRequest({...entryRequest,path:'/api/payment/create'}),/偏离入口/);
+  const first=await bench.testRequest(entryRequest);assert.equal(first.status,200);assert.equal(JSON.parse(first.body).status,'COMPLETED');
+  const logs=(await bench.runtime.requests()).filter(l=>!l.url.includes('?'));assert.equal(new Set(logs.filter(l=>l.matched).map(l=>l.url)).size,4);assert(logs.every(l=>l.status===200));pass('Entry API verification','Generated /shop context-path request hit actual Spring Boot and all 4 downstream mocks, COMPLETED');
   const bank=bench.workspace.rules.find(r=>r.name==='Bank API')!;const modified=structuredClone(bench.workspace.rules);modified.find(r=>r.id===bank.id)!.body={transactionId:'txn_declined',approved:false,message:'Declined for test'};await bench.setRules(modified);
   const second=await bench.testRequest(request);assert.equal(JSON.parse(second.body).status,'DECLINED');assert.equal(bench.workspace.rules.find(r=>r.id===bank.id)!.version,bank.version+1);pass('Edit & hot reload','Changed Bank response; Java returned DECLINED without restart');
   const invalid=structuredClone(modified);invalid[0].status=999;await assert.rejects(()=>bench.setRules(invalid));const afterInvalid=await bench.testRequest(request);assert.equal(JSON.parse(afterInvalid.body).status,'DECLINED');pass('Invalid rule isolation','Invalid status rejected; existing runtime preserved');

@@ -49,7 +49,9 @@ test('Local API rejects cross-origin mutation and arbitrary shell execution',asy
   try{const base=`http://127.0.0.1:${service.port}`;const response=await fetch(base+'/api/terminal',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:'{}'});assert.equal(response.status,403);
     const plain=await fetch(base+'/api/terminal',{method:'POST',headers:{'Content-Type':'text/plain'},body:'{}'});assert.equal(plain.status,415);
     for(const endpoint of ['/api/snapshots','/api/snapshots/restore']){const removed=await fetch(base+endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(removed.status,404);}
-    const cmd=await fetch(base+'/api/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'rm -rf /'})});assert.equal(cmd.status,400);
+    const project=path.join(temp,'project');await fs.cp('examples/payment-service',project,{recursive:true,filter:file=>!file.split(path.sep).some(part=>['target','.mockingbird'].includes(part))});
+    const bench=await service.projects.open(project);
+    const cmd=await fetch(base+'/api/projects/'+bench.workspace.project!.id+'/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'rm -rf /'})});assert.equal(cmd.status,400);assert.match((await cmd.json()).error,/仅允许/);
   }finally{await service.close();await fs.rm(temp,{recursive:true,force:true});}
 });
 test('Sensitive tokens are redacted',()=>{assert(!redact('Bearer abcdefg.123').includes('abcdefg'));assert(!redact('{"token":"sensitive","password":"secret"}').includes('sensitive'));});

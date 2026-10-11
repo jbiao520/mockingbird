@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Dependency, DependencyDraft, Workflow } from '../shared/types';
-import type { Index } from './analyzer';
+import { propertyForSource, type Index } from './analyzer';
 
 const reference=z.object({file:z.string().max(2000),line:z.number().int().min(1)});
 export const dependencyDraftSchema=z.object({
@@ -32,7 +32,7 @@ export function confirmDependency(input:unknown,index:Index,wf:Workflow,kind:'ma
   if(!draft.path.startsWith('/')||draft.path.startsWith('//')||draft.path.startsWith('/__admin')||/[?#\s]/.test(draft.path))throw new Error('请确认请求路径，以 / 开头，不包含查询串、空格或 fragment');
   let base=draft.originalBase;
   if(draft.configKey){
-    const configured=index.properties[draft.configKey];
+    const configured=propertyForSource(index,draft.configKey,wf.entry.file);
     if(!configured)throw new Error('未找到此配置项，请核对或清空配置键');
     base=configured;
   }

@@ -1,4 +1,4 @@
-import type { Index } from './analyzer';
+import { propertyForSource, type Index } from './analyzer';
 import { shapeOf } from './response-shape';
 import type { RequestTemplate } from '../shared/types';
 
@@ -59,8 +59,14 @@ function contract(index:Index,entryId:string){
   });
   return{entry,bindings};
 }
+function entryRequestPath(index:Index,entry:{file:string;path:string}){
+  const prefix=(propertyForSource(index,'server.servlet.context-path',entry.file)||'').trim();
+  if(!prefix||prefix==='/')return entry.path;
+  if(!prefix.startsWith('/')||/[?#{}\s\\]|\/\/|(?:^|\/)\.{1,2}(?:\/|$)/.test(prefix))throw new Error('server.servlet.context-path 未能解析为有效路径，请核对入口模块配置');
+  return prefix.replace(/\/+$/,'')+entry.path;
+}
 export function generateRequestTemplate(index:Index,entryId:string):RequestTemplate{
-  const {entry,bindings}=contract(index,entryId),warnings:string[]=[],headers:Record<string,string>={},query=new URLSearchParams();let path=entry.path,body:unknown;
+  const {entry,bindings}=contract(index,entryId),warnings:string[]=[],headers:Record<string,string>={},query=new URLSearchParams();let path=entryRequestPath(index,entry),body:unknown;
   for(const binding of bindings){
     if(!binding.kind){warnings.push(`参数 ${binding.name} 的 Spring 绑定方式未确认，请手动填写`);continue;}
     const sample=visit(index,binding.type,undefined,binding.kind==='RequestBody'?'body':binding.name,[],warnings,true);
@@ -77,11 +83,12 @@ export function generateRequestTemplate(index:Index,entryId:string):RequestTempl
 }
 export function validateEntryRequest(index:Index,entryId:string,input:{method:string;path:string;body?:unknown;headers?:Record<string,string>}){
   const {entry,bindings}=contract(index,entryId);
+  const requestPath=entryRequestPath(index,entry);
   const actual=new URL(input.path,'http://localhost').pathname;
-  const pattern=entry.path.split(/(\{[^}]+\})/).map(p=>p.startsWith('{')?'[^/]+':p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('');
+  const pattern=requestPath.split(/(\{[^}]+\})/).map(p=>p.startsWith('{')?'[^/]+':p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('');
   if(input.method!==entry.method||!new RegExp('^'+pattern+'$').test(actual))throw new Error('请求方法或路径已偏离入口 API，请重新点击“验证入口 API”');
   const warnings:string[]=[];
-  const captures=new RegExp('^'+entry.path.split(/(\{[^}]+\})/).map(p=>p.startsWith('{')?'([^/]+)':p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('')+'$').exec(actual)!;
+  const captures=new RegExp('^'+requestPath.split(/(\{[^}]+\})/).map(p=>p.startsWith('{')?'([^/]+)':p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('')+'$').exec(actual)!;
   const names=[...entry.path.matchAll(/\{([^}:]+)(?::[^}]+)?\}/g)].map(m=>m[1]);
   const query=new URL(input.path,'http://localhost').searchParams;
   for(const binding of bindings.filter(b=>b.kind&&b.kind!=='RequestBody')){

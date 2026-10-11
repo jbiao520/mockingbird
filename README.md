@@ -69,6 +69,25 @@ AI 在用户明确要求动态行为时可返回同一套可编辑配置，仍�
 
 快捷键：⌘ / Ctrl + O 打开项目；B 折叠左栏；Shift + B 折叠 AI 栏；J 切换工具面板；S 保存有效的 Mock 草稿。
 
+## 多项目与窗口
+
+顶部项目 Tab 栏展示当前窗口打开的项目，点击切换，点击 `＋` 在当前窗口打开新项目。Tab 支持左右方向键、Home / End 切换，数量较多时可横向滚动，悬停显示完整路径；绿点表示项目有运行中的服务或 AI 任务。关闭当前 Tab 后切到相邻项目，最后一个关闭后回到欢迎页；关闭项目会停止该项目的服务和任务。刷新页面会恢复当前窗口的项目 Tab 与选中项目。
+
+项目名下拉切换器包含已打开项目、最近项目、路径搜索，以及各项目的 Java / WireMock / AI 运行状态；其他窗口中的项目可从此处聚焦或操作。切回已打开项目会复用索引和工作区，恢复标签页、当前 Flow、文件树、Mock 草稿、HTTP 请求草稿与未发送的 AI 输入。源码或配置变化仍需重新索引并核对依赖。
+
+- **切换项目**：保留原项目的 Java、WireMock 和 AI 任务，后台结果只写回所属项目。
+- **关闭项目**：先保存编辑草稿，再取消分析 / AI / 行为预览，停止该项目的 Java / WireMock 和文件监听。其它项目继续运行。重开恢复配置和草稿，不自动启动服务或 AI。
+- **桌面多窗口**：打开项目弹窗可勾选“在新窗口打开”；项目切换器中的箭头可把项目移到独立窗口。原窗口保留其它项目。同一真实目录只保留一个项目实例；再次打开会切到或聚焦已有窗口。文件菜单也提供“新建窗口”。关闭桌面窗口会关闭归属该窗口的全部项目，退出应用关闭所有管理的进程。
+- **浏览器模式**：支持单页面切换多个项目。同一项目被其它标签页占用时会提示返回原标签页；标签页异常退出后约两分钟可重新接管。结束服务请使用“关闭项目”，浏览器标签页关闭不自动停止后台项目。
+
+每个项目的 WireMock 工作目录和服务端口独立。未应用 Mock 路由时会选择可用端口；已经写入路由的 Mock 端口保持不变，冲突会明确报错。修改这类端口须先恢复 Real 路由，再选择新端口、重新应用 Mock 路由并重启 Java。
+
+项目中的 `.mockingbird/workspace.json` 与 `routes.properties` 继续保存已应用配置。应用数据目录的 `projects/<projectId>/view.json` 单独保存未发布的编辑状态，包括尚未完成的 JSON；`ports.json` 保存运行端口。草稿自动保存在本机，只有“保存并应用”才修改已发布规则；源码版本过期的草稿不能直接发布。`recent.json`、`settings.json` 与 CLI / 模型目录由应用统一管理，各项目共享模型选择。
+
+内部 HTTP API 使用 `/api/projects/:projectId/...` 指定项目；`/api/state` 返回应用的项目列表。旧的无项目 ID 的规则、运行和任务接口已移除，窗口通过 `X-Mockingbird-Client` 标识归属。
+
+界面和原生窗口回归：首次运行先执行 `npx playwright install chromium`，随后执行 `npm run test:ui`。测试使用临时项目和独立应用数据目录，不修改本机项目，也不调用真实 AI 模型。
+
 ## Mock 导出
 
 在 Mock Rules 编辑器右上角点击 **导出**，选择 **WireMock** 或 **Postman Collection v2.1**。导出包含当前编辑器草稿，不会自动保存或发布；默认仅包含启用规则。勾选包含未启用场景后，WireMock 会检查这些场景是否可以同时启用，因为其 Mapping 没有规则启用标记。
@@ -78,6 +97,8 @@ WireMock 文件是标准 `{ "mappings": [...] }` 批量导入 JSON，通过目�
 Postman 文件通过 Import 导入，包含各场景的请求、响应 Examples、Query、Header 和 JSON Body。Collection 的 `baseUrl` 默认是本地 Mock 地址，路径变量使用 `sample` 示例值。需要 Postman Mock Server 时，另行创建并配置 Header / Body 匹配；原始延迟仅保留在说明中。
 
 ## 入口 API 请求验证
+
+入口请求会按 Controller 所在模块读取基础配置中的 `server.servlet.context-path`，自动添加应用路径前缀；生成与发送校验使用同一完整路径。多模块项目的 URL 配置也按 Flow 入口所在的应用模块解析，即使 HTTP Client 位于共享模块，也不会借用其它应用模块的同名配置。`src/test` 下的配置不参与运行配置解析。同一模块内的基础配置文件对同一键给出不同值时会报冲突，需先核对配置。旧工作区中的错误地址不能直接重新确认或应用 Mock 路由，应重新索引并编辑确认依赖。
 
 路由页的 **验证入口 API** 根据当前源码生成请求方法、路径、Query、Headers 和 JSON Body，每次打开都重置上一份请求。`long / Long` 生成 JSON 整数，字符串、布尔值、集合、嵌套 DTO 和枚举按可解析类型生成；DTO 的 `@JsonProperty`、`@JsonNaming` 和 `@JsonIgnore` 参与字段映射。示例值用于结构验证，业务 ID 和金额仍需按实际场景填写。
 
@@ -102,8 +123,9 @@ Codex / OpenCode / Grok 通过各自模型服务工作。AI 可按需读取隔�
 ## 验证与构建
 
 ```sh
-npm test           # 核心、依赖发现、源码生成、导出与模型发现测试
+npm test           # 核心、依赖发现、源码生成、导出、模型发现与多项目隔离测试
 npm run test:e2e   # 真实 WireMock + Spring Boot 端到端流程
+npm run test:ui    # 浏览器项目切换 / 草稿恢复与 Electron 多窗口回归
 npm run test:runtime # JDK 分块 POST 与 HTTP/2 降级兼容性（需要 JDK 和 WireMock）
 npm run test:agent # 已登录 Codex 的分析、生成、审核和取消
 npm run test:grok  # 已登录 Grok 的分析、生成、审核和取消
@@ -113,4 +135,7 @@ npm run package    # 当前平台的本地目录应用包
 
 测试在临时副本中执行并清理所属进程，不修改示例源码。Codex 验证会使用当前账户的模型额度。验收证据见 [docs/acceptance.md](docs/acceptance.md)、[artifacts/e2e-report.json](artifacts/e2e-report.json) 和 [artifacts/agent-report.json](artifacts/agent-report.json)。
 
-主要代码：`src/` 桌面界面；`server/analyzer.ts` 源码索引和入口工作流；`server/analysis*.ts` 异步 Worker；`server/agents.ts` CLI Adapter；`server/dependencies.ts` 依赖校验与确认；`server/rules.ts` 校验与生成；`server/runtime.ts` WireMock；`server/routes.ts` 路由与 Java 启动；`electron/main.ts` 桌面壳；`examples/payment-service/` 验收项目。
+主要代码：`src/App.tsx` 应用与窗口会话、`src/ProjectWorkbench.tsx` 单项目界面、`src/project-session.tsx` 草稿与请求归属；`server/projects.ts` 项目管理与共享设置；`server/analyzer.ts` 源码索引和入口工作流；`server/analysis*.ts` 异步 Worker；`server/agents.ts` CLI Adapter；`server/dependencies.ts` 依赖校验与确认；`server/rules.ts` 校验与生成；`server/runtime.ts` WireMock；`server/routes.ts` 路由与 Java 启动；`electron/main.ts` 桌面壳；`examples/payment-service/` 验收项目。
+
+
+每条 Mock Rule 的 **AI 修改** 可用文字配置请求匹配、动态字段、条件例外、连续调用、延迟和故障。选择已安装的 Codex / OpenCode / Grok CLI，输入需求后，Agent 会基于所选规则的当前草稿提出建议。点击 **Review 行为修改** 查看完整配置 Diff，可继续编辑或 Discard；点击 **批准并应用** 后才会验证并发布到本地 Mock 服务。建议绑定具体 Rule 和源码版本，规则、依赖或当前草稿发生变化时需重新请求，避免覆盖后续修改。

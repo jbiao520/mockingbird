@@ -46,11 +46,12 @@ test('Export API returns downloadable files, rejects invalid formats and support
   let saved:unknown;
   const service=await createServer({root:process.cwd(),dataDir:temp,saveExport:async artifact=>{saved=artifact;return null;}},0);
   try{
-    const url=`http://127.0.0.1:${service.port}/api/rules/export`;
+    const project=path.join(temp,'project');await fs.cp('examples/payment-service',project,{recursive:true,filter:s=>!s.includes('/target')&&!s.includes('/.mockingbird')});
+    const bench=await service.projects.open(project);const url=`http://127.0.0.1:${service.port}/api/projects/${bench.workspace.project!.id}/rules/export`;
     const post=(format:string)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rules:[rule()],format})});
     const response=await post('postman');assert.equal(response.status,200);assert.deepEqual(await response.json(),{savedPath:null,cancelled:true});assert(saved);
     assert.equal((await post('invalid')).status,400);
-    delete service.workbench.options.saveExport;
+    delete service.projects.options.saveExport;
     const download=await (await post('wiremock')).json();assert(download.filename.endsWith('.wiremock.json'));assert.equal(JSON.parse(download.content).mappings.length,1);
   }finally{await service.close();await fs.rm(temp,{recursive:true,force:true});}
 });
@@ -101,7 +102,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 });
 
 test('Grok model discovery parses its CLI catalog and default selection',async()=>{
-  assert.deepEqual(parseGrokModels('You are logged in.\nDefault model: grok-4.7\nAvailable models:\n * grok-4.7 (default)\n - grok-4.5\n - grok-4.5\n'),[{id:'grok-4.7',name:'grok-4.7',isDefault:true},{id:'grok-4.5',name:'grok-4.5',isDefault:false}]);
+  assert.deepEqual(parseGrokModels('You are logged in.\nDefault model: grok-4.7\nAvailable models:\n * grok-4.7 (default)\n - grok-4.5\n - grok-4.5\n'),[{id:'grok-4.7',name:'grok-4.7',isDefault:true,efforts:['low','medium','high','xhigh'],defaultEffort:'medium'},{id:'grok-4.5',name:'grok-4.5',isDefault:false,efforts:['low','medium','high'],defaultEffort:'medium'}]);
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mockingbird-grok-models-'));
   const cli=path.join(temp,'grok');
   try{

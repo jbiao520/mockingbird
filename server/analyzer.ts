@@ -13,12 +13,27 @@ function closeAt(s:string,start:number,left='{',right='}') {const clean=mask(s,t
 function depthAt(s:string,start:number,end:number){let d=0;for(let i=start;i<end;i++){if(s[i]==='{')d++;if(s[i]==='}')d--;}return d;}
 function mapping(s:string):{method:HttpMethod;path:string}|undefined{const m=/@(Get|Post|Put|Patch|Delete|Head|Options|Request)Mapping\s*(?:\(([\s\S]*?)\))?/.exec(s);if(!m)return;return{method:(m[1]==='Request'?/RequestMethod\.(\w+)/.exec(m[2]||'')?.[1]||'GET':m[1].toUpperCase()) as HttpMethod,path:/"([^"\n]*)"/.exec(m[2]||'')?.[1]||''};}
 const joinPath=(...s:string[])=>('/'+s.filter(Boolean).join('/')).replace(/\/{2,}/g,'/').replace(/\/$/,'')||'/';
-export interface Index {project:Project;methods:JavaMethod[];sources:Map<string,string>;properties:Record<string,string>;classHeaders:Map<string,string>;contracts:Record<string,unknown>}
+export interface ProjectConfig {file:string;module:string;properties:Record<string,string>}
+export interface Index {project:Project;methods:JavaMethod[];sources:Map<string,string>;properties:Record<string,string>;configFiles?:ProjectConfig[];classHeaders:Map<string,string>;contracts:Record<string,unknown>}
+export function sourceModule(index:{project:Pick<Project,'modules'>},file:string){
+  return index.project.modules.filter(m=>m!=='.'&&(file===m||file.startsWith(m+'/'))).sort((a,b)=>b.length-a.length)[0]||'.';
+}
+// Resolve runtime properties from the entry application's module, including when
+// the HTTP client lives in a shared library. Sibling and parent POM resources
+// are not automatically part of that application's Spring configuration.
+export function propertyForSource(index:Index,key:string,file:string):string|undefined{
+  if(!index.configFiles)return index.properties[key];
+  const module=sourceModule(index,file),matches=index.configFiles.filter(c=>c.module===module&&Object.hasOwn(c.properties,key));
+  const values=new Set(matches.map(c=>c.properties[key]));
+  if(values.size>1)throw new Error(`配置项 ${key} 在模块 ${module} 中存在冲突，请核对：${matches.map(c=>c.file).join('、')}`);
+  return matches[0]?.properties[key];
+}
 export async function indexProject(input:string,progress?:(message:string)=>void):Promise<Index>{
   const root=await fs.realpath(path.resolve(input));if(!(await fs.stat(root)).isDirectory())throw new Error('请选择 Java 项目目录');
   const build:Project['build']=await exists(path.join(root,'pom.xml'))?'Maven':'Gradle';
   if(build==='Gradle'&&!await exists(path.join(root,'build.gradle'))&&!await exists(path.join(root,'build.gradle.kts')))throw new Error('未发现 pom.xml 或 build.gradle(.kts)，请选择项目根目录');
   const sources=new Map<string,string>(),properties:Record<string,string>={},warnings:string[]=[],methods:JavaMethod[]=[],entries:Entry[]=[],classHeaders=new Map<string,string>(),modules:string[]=[];
+  const configFiles:ProjectConfig[]=[];
   let fileCount=0;
   async function walk(dir:string):Promise<FileNode[]>{
     const nodes:FileNode[]=[];const items=(await fs.readdir(dir,{withFileTypes:true})).sort((a,b)=>Number(b.isDirectory())-Number(a.isDirectory())||a.name.localeCompare(b.name));
@@ -31,14 +46,26 @@ export async function indexProject(input:string,progress?:(message:string)=>void
       nodes.push({name:item.name,path:relative,directory:false});
       if(item.name==='pom.xml'||/^build\.gradle/.test(item.name))if(dir!==root)modules.push(path.relative(root,dir));
       if(item.name.endsWith('.java')&&!/(^|\/)test\//.test(relative)){if((await fs.stat(absolute)).size>1024*1024){warnings.push(relative+' 超过 1MB，已跳过');continue;}sources.set(relative,await fs.readFile(absolute,'utf8'));}
-      if(/^application\.(properties|ya?ml)$/.test(item.name)){
+      if(/^application\.(properties|ya?ml)$/.test(item.name)&&!/(^|\/)test\//.test(relative)){
         const content=await fs.readFile(absolute,'utf8');
-        if(item.name.endsWith('.properties'))for(const l of content.split('\n')){const p=/^\s*([^#!\s][^=:\s]*)\s*[=:]\s*(.*?)\s*$/.exec(l);if(p)properties[p[1]]=p[2];}
-        else try{const flatten=(v:unknown,prefix='')=>{if(v&&typeof v==='object')for(const[k,val]of Object.entries(v))flatten(val,prefix?prefix+'.'+k:k);else if(v!=null)properties[prefix]=String(v);};flatten(YAML.parse(content));}catch{warnings.push(relative+' YAML 解析失败');}
+        const values:Record<string,string>={};
+        if(item.name.endsWith('.properties'))for(const l of content.split('\n')){const p=/^\s*([^#!\s][^=:\s]*)\s*[=:]\s*(.*?)\s*$/.exec(l);if(p)values[p[1]]=p[2];}
+        else try{const flatten=(v:unknown,prefix='')=>{if(v&&typeof v==='object')for(const[k,val]of Object.entries(v))flatten(val,prefix?prefix+'.'+k:k);else if(v!=null)values[prefix]=String(v);};flatten(YAML.parse(content));}catch{warnings.push(relative+' YAML 解析失败');}
+        configFiles.push({file:relative,module:'.',properties:values});
       }
     }return nodes;
   }
   const files=await walk(root);if(!sources.size)throw new Error('未找到 Java 源文件');
+  const moduleProject={modules:modules.map(m=>m.split(path.sep).join('/'))};
+  for(const config of configFiles)config.module=sourceModule({project:moduleProject},config.file);
+  const propertyValues=new Map<string,Set<string>>();
+  for(const config of configFiles)for(const[key,value]of Object.entries(config.properties)){
+    const values=propertyValues.get(key)||new Set<string>();values.add(value);propertyValues.set(key,values);
+  }
+  for(const[key,values]of propertyValues){
+    if(values.size===1)properties[key]=[...values][0];
+    else warnings.push(`配置项 ${key} 存在多个值，将按入口模块解析；同一模块内的冲突需人工确认`);
+  }
   let parsedCount=0;
   for(const[file,source]of sources){
     progress?.(`解析 Java · ${++parsedCount}/${sources.size}`);
@@ -58,8 +85,8 @@ export async function indexProject(input:string,progress?:(message:string)=>void
   const buildSource=await fs.readFile(path.join(root,build==='Maven'?'pom.xml':await exists(path.join(root,'build.gradle'))?'build.gradle':'build.gradle.kts'),'utf8');
   const javaVersion=/<java.version>(.*?)<|<maven.compiler.(?:source|release)>(.*?)<|JavaLanguageVersion.of\((\d+)\)|VERSION_(\d+)/.exec(buildSource)?.slice(1).find(Boolean)||'未声明';
   let contracts:Record<string,unknown>={};try{contracts=JSON.parse(await fs.readFile(path.join(root,'src/main/resources/mockingbird-contracts.json'),'utf8'));}catch{/* optional samples */}
-  const revision=hash([...sources].map(([f,s])=>f+s).join('')+JSON.stringify(properties));
-  return{project:{id:hash(root),name:path.basename(root),path:root,build,javaVersion,modules:modules.length?modules:['.'],files,entries,indexedAt:new Date().toISOString(),revision,warnings,fileCount},methods,sources,properties,classHeaders,contracts};
+  const revision=hash([...sources].map(([f,s])=>f+s).join('')+JSON.stringify(configFiles));
+  return{project:{id:hash(root),name:path.basename(root),path:root,build,javaVersion,modules:moduleProject.modules.length?moduleProject.modules:['.'],files,entries,indexedAt:new Date().toISOString(),revision,warnings,fileCount},methods,sources,properties,configFiles,classHeaders,contracts};
 }
 // Opening an API creates an entry-only workflow. Dependencies are supplied by users or AI.
 export function analyze(index:Index,entryId:string):Workflow{

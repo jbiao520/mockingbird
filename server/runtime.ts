@@ -16,15 +16,18 @@ export class MockRuntime{
   async init(){this.state.ready=await exists(this.jar)&&(await fs.stat(this.jar)).size>1000000;}
   private log(s:string){this.state.logs.push(redact(s));this.state.logs=this.state.logs.slice(-300);this.changed();}
   async admin(endpoint:string,method='GET',data?:unknown){const res=await fetch(`http://127.0.0.1:${this.state.port}/__admin/${endpoint}`,{method,headers:{'Content-Type':'application/json',Authorization:'Basic '+this.auth},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(5000)});if(!res.ok)throw new Error(`WireMock ${endpoint}: HTTP ${res.status}`);const content=await res.text();return content?JSON.parse(content):{};}
-  async start(port:number,rules:MockRule[]){
+  async start(port:number,rules:MockRule[],signal?:AbortSignal){
+    signal?.throwIfAborted();
     if(this.child)throw new Error('Mock Server 已启动或正在启动');validateRules(rules);await assertPort(port);await this.init();if(!this.state.ready)throw new Error('WireMock 未安装，请运行 npm run setup:runtime');await fs.mkdir(this.cwd,{recursive:true});
+    signal?.throwIfAborted();
     const password=randomBytes(24).toString('hex');this.auth=Buffer.from('mockingbird:'+password).toString('base64');this.state={...this.state,status:'starting',port,error:undefined,logs:[]};this.changed();
     // WireMock 3.13.2 can cancel chunked POST streams during h2c upgrade.
     // Let Java clients fall back to HTTP/1.1 for the local plaintext listener.
     const child=spawn(process.env.JAVA_PATH||'java',['-jar',this.jar,'--port',String(port),'--bind-address','127.0.0.1','--root-dir',this.cwd,'--admin-api-basic-auth','mockingbird:'+password,'--disable-banner','--disable-http2-plain'],{detached:process.platform!=='win32',stdio:['ignore','pipe','pipe']});this.child=child;let spawnError:Error|undefined;
+    const abort=()=>terminate(child);signal?.addEventListener('abort',abort,{once:true});child.once('close',()=>signal?.removeEventListener('abort',abort));
     child.stdout?.on('data',b=>this.log(b.toString().replaceAll(password,'[REDACTED]')));child.stderr?.on('data',b=>this.log(b.toString().replaceAll(password,'[REDACTED]')));
     child.on('error',e=>{spawnError=e;this.state.status='failed';this.state.error=e.message;this.child=undefined;this.changed();});child.on('close',code=>{if(this.child===child){this.child=undefined;if(this.state.status!=='stopped'){this.state.status='failed';this.state.error=`WireMock 意外退出（${code}）`;this.changed();}}});
-    try{for(let i=0;i<120;i++){if(spawnError)throw spawnError;if(child.exitCode!==null)throw new Error('WireMock 启动失败：'+this.state.logs.slice(-3).join(''));try{await this.admin('mappings');}catch(e){if(i===119)throw e;await new Promise(r=>setTimeout(r,250));continue;}await this.publish(rules);this.state.status='running';this.changed();return;}}catch(e){await this.stop();this.state.status='failed';this.state.error=(e as Error).message;this.changed();throw e;}
+    try{for(let i=0;i<120;i++){signal?.throwIfAborted();if(spawnError)throw spawnError;if(child.exitCode!==null)throw new Error('WireMock 启动失败：'+this.state.logs.slice(-3).join(''));try{await this.admin('mappings');}catch(e){if(i===119)throw e;await new Promise(r=>setTimeout(r,250));continue;}await this.publish(rules);this.state.status='running';this.changed();return;}}catch(e){await this.stop();this.state.status='failed';this.state.error=(e as Error).message;this.changed();throw e;}
   }
   private published:MockRule[]=[];
   async publish(rules:MockRule[]){
